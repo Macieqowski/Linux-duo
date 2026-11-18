@@ -1,0 +1,30 @@
+From 37501a11e73c786b9e56077f6af5c4f12e5f6414 Mon Sep 17 00:00:00 2001
+From: Bryson <10244083+brysonwf@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 18:34:32 -0500
+Subject: [PATCH 41/54] dt-bindings: net: qcom,ipa: add SM8150 compatible
+
+Document the IPA v4.1 found on the SM8150 SoC.
+
+This patch was written by Claude (Anthropic's AI assistant) under the direction of Bryson, who reviewed and
+tested it on a Surface Duo.
+
+Signed-off-by: Bryson <10244083+brysonwf@users.noreply.github.com>
+---
+ Documentation/devicetree/bindings/net/qcom,ipa.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/net/qcom,ipa.yaml b/Documentation/devicetree/bindings/net/qcom,ipa.yaml
+index 68ec76fe4..3634c2696 100644
+--- a/Documentation/devicetree/bindings/net/qcom,ipa.yaml
++++ b/Documentation/devicetree/bindings/net/qcom,ipa.yaml
+@@ -52,6 +52,7 @@ properties:
+           - qcom,sdx55-ipa
+           - qcom,sdx65-ipa
+           - qcom,sm6350-ipa
++          - qcom,sm8150-ipa
+           - qcom,sm8350-ipa
+           - qcom,sm8550-ipa
+       - items:
+-- 
+2.43.0
+

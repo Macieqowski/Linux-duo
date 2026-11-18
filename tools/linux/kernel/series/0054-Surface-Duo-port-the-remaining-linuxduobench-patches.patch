@@ -1,0 +1,2724 @@
+From 41a1542e87eb116fad6d78c9d5d036731ba51ff9 Mon Sep 17 00:00:00 2001
+From: Linux-duo <duo@localhost>
+Date: Wed, 18 Nov 2026 23:16:45 +0000
+Subject: [PATCH 54/54] Surface Duo: port the remaining linuxduobench patches
+ to v7.3
+
+Patches of the v6.19 series that did not apply to v7.3.5:
+- already upstream in v7.3 (dropped): 0012-0020 (WCN39xx pwrseq, BT and DT),
+  0023/0024 (ath10k skip host-cap quirk), 0025 (smbx charge disable),
+  0074-0086 (drm/msm VM + recovery fixes), 0088 (dispcc-sm8250 parent PLL)
+- ported by hand: 0028/0029/0031/0034 (qcom_smbx SMB5, driver taken from the series),
+  0035 (DSI DSC slices: upstream has the flag, only NO_CMD_BURST kept),
+  0038 (dp snapshot guard), 0042 (venus SM8150), 0043 (camss SM8150),
+  0051 (wcd934x: keep upstream micbias parsing), 0055 (q6asm close on re-prepare),
+  0062 (IPA v4.1)
+- dropped: 0067 (fbdev deferred-I/O flush, upstream fbdev rework; only the RAM shell used it)
+- duo.config: CONFIG_VIDEO_QCOM_IRIS off so venus keeps the SM8150 compatible
+---
+ .../bindings/sound/qcom,wcd934x.yaml          |   4 +
+ .../sm8150-microsoft-surface-duo-audio.dtsi   |   4 +
+ arch/arm64/boot/dts/qcom/sm8150.dtsi          |   9 -
+ arch/arm64/configs/duo.config                 |   3 +
+ drivers/gpu/drm/msm/dp/dp_display.c           |   4 +-
+ drivers/media/platform/qcom/camss/camss.c     | 110 ++-
+ drivers/media/platform/qcom/venus/core.c      |  48 ++
+ drivers/media/platform/qcom/venus/core.h      |   2 +-
+ drivers/media/platform/qcom/venus/hfi_cmds.c  |   7 +
+ drivers/media/platform/qcom/venus/hfi_venus.c |  56 ++
+ .../media/platform/qcom/venus/pm_helpers.c    |  26 +-
+ drivers/media/platform/qcom/venus/venc.c      |  23 +
+ drivers/net/ipa/Makefile                      |   4 +-
+ drivers/net/ipa/data/ipa_data-v4.1.c          | 502 +++++++++++++
+ drivers/net/ipa/gsi_reg.c                     |   1 +
+ drivers/net/ipa/ipa_data.h                    |   1 +
+ drivers/net/ipa/ipa_main.c                    |   4 +
+ drivers/net/ipa/ipa_reg.c                     |   2 +
+ drivers/net/ipa/ipa_reg.h                     |   1 +
+ drivers/net/ipa/reg/ipa_reg-v4.1.c            | 480 +++++++++++++
+ drivers/power/supply/qcom_smbx.c              | 658 +++++++++---------
+ sound/soc/codecs/wcd934x.c                    |  10 +-
+ sound/soc/qcom/qdsp6/q6asm-dai.c              |  12 +-
+ 23 files changed, 1619 insertions(+), 352 deletions(-)
+ create mode 100644 drivers/net/ipa/data/ipa_data-v4.1.c
+ create mode 100644 drivers/net/ipa/reg/ipa_reg-v4.1.c
+
+diff --git a/Documentation/devicetree/bindings/sound/qcom,wcd934x.yaml b/Documentation/devicetree/bindings/sound/qcom,wcd934x.yaml
+index 3a7334e41..cb64266cd 100644
+--- a/Documentation/devicetree/bindings/sound/qcom,wcd934x.yaml
++++ b/Documentation/devicetree/bindings/sound/qcom,wcd934x.yaml
+@@ -79,6 +79,10 @@ properties:
+     minimum: 1800000
+     maximum: 2850000
+ 
++  qcom,no-headset-jack:
++    description: The board has no headset jack; the codec's headset detection (MBHC) is not set up
++    type: boolean
++
+   qcom,hphl-jack-type-normally-closed:
+     description: Indicates that HPHL jack switch type is normally closed
+     type: boolean
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi
+index b99354289..0584578f5 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi
+@@ -164,6 +164,10 @@ wcd9340: codec@1,0 {
+ 				qcom,micbias3-microvolt = <1800000>;
+ 				qcom,micbias4-microvolt = <1800000>;
+ 
++				/* The Duo has no headphone jack: without this the codec's headset detection measures the floating
++				 * HPH/MIC pins and reports a phantom mono headset ("Headphone Jack" + "Headset Mic Jack" = on) */
++				qcom,no-headset-jack;
++
+ 				#address-cells = <1>;
+ 				#size-cells = <1>;
+ 
+diff --git a/arch/arm64/boot/dts/qcom/sm8150.dtsi b/arch/arm64/boot/dts/qcom/sm8150.dtsi
+index 59d67514b..94a3b02cb 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8150.dtsi
+@@ -1702,15 +1702,6 @@ uart13: serial@c8c000 {
+ 				status = "disabled";
+ 			};
+ 
+-			uart13: serial@c8c000 {
+-				compatible = "qcom,geni-uart";
+-				reg = <0 0x00c8c000 0 0x4000>;
+-				clocks = <&gcc GCC_QUPV3_WRAP2_S3_CLK>;
+-				clock-names = "se";
+-				interrupts = <GIC_SPI 585 IRQ_TYPE_LEVEL_HIGH>;
+-				status = "disabled";
+-			};
+-
+ 			i2c14: i2c@c90000 {
+ 				compatible = "qcom,geni-i2c";
+ 				reg = <0 0x00c90000 0 0x4000>;
+diff --git a/arch/arm64/configs/duo.config b/arch/arm64/configs/duo.config
+index dc98a33a0..f08320a99 100644
+--- a/arch/arm64/configs/duo.config
++++ b/arch/arm64/configs/duo.config
+@@ -513,3 +513,6 @@ CONFIG_NETFILTER_XT_MATCH_MARK=y
+ CONFIG_NETFILTER_XT_TARGET_MARK=y
+ CONFIG_NETFILTER_XT_TARGET_CONNMARK=y
+ CONFIG_NETFILTER_XT_MATCH_OWNER=y
++
++# v7.3 port: the iris driver would claim the venus compatibles and hide the SM8150 entry
++# CONFIG_VIDEO_QCOM_IRIS is not set
+diff --git a/drivers/gpu/drm/msm/dp/dp_display.c b/drivers/gpu/drm/msm/dp/dp_display.c
+index 3d05d7194..a0c44e7ee 100644
+--- a/drivers/gpu/drm/msm/dp/dp_display.c
++++ b/drivers/gpu/drm/msm/dp/dp_display.c
+@@ -852,7 +852,9 @@ void msm_dp_snapshot(struct msm_disp_state *disp_state, struct msm_dp *dp)
+ 	 * power_on status before dumping DP registers to avoid crash due
+ 	 * to unclocked access
+ 	 */
+-	if (!dp->power_on)
++	/* after an unplug power_on is still set while the core/PHY are off */
++	if (!dp->power_on || !msm_dp_display->core_initialized ||
++	    !msm_dp_display->phy_initialized)
+ 		return;
+ 
+ 	msm_disp_snapshot_add_block(disp_state, msm_dp_display->ahb_len,
+diff --git a/drivers/media/platform/qcom/camss/camss.c b/drivers/media/platform/qcom/camss/camss.c
+index 68491b16d..b5f12fa4d 100644
+--- a/drivers/media/platform/qcom/camss/camss.c
++++ b/drivers/media/platform/qcom/camss/camss.c
+@@ -5418,7 +5418,9 @@ static int camss_probe(struct platform_device *pdev)
+ 	if (ret < 0)
+ 		goto err_genpd_cleanup;
+ 
+-	ret = dma_set_mask_and_coherent(dev, 0xffffffff);
++	/* the SM8150 IFE only addresses IOVAs below 0xE0000000 */
++	ret = dma_set_mask_and_coherent(dev, of_device_is_compatible(dev->of_node, "qcom,sm8150-camss") ?
++					0xe0000000 - 1 : 0xffffffff);
+ 	if (ret)
+ 		goto err_genpd_cleanup;
+ 
+@@ -5660,6 +5662,111 @@ static const struct camss_resources sm6350_resources = {
+ 	.vfe_num = ARRAY_SIZE(vfe_res_sm6350),
+ };
+ 
++/* SM8150: sdm845 VFEs + the GCC camera AXI clocks */
++static const struct camss_subdev_resources vfe_res_8150[] = {
++	/* VFE0 */
++	{
++		.regulators = {},
++		.clock = { "gcc_camera_axi", "gcc_camera_sf_axi", "camnoc_axi", "cpas_ahb", "slow_ahb_src",
++				"soc_ahb", "vfe0", "vfe0_axi",
++				"vfe0_src", "csi0",
++				"csi0_src"},
++		.clock_rate = { { 0 },
++				{ 0 },
++				{ 0 },
++				{ 0 },
++				{ 80000000 },
++				{ 0 },
++				{ 19200000, 100000000, 320000000, 404000000, 480000000, 600000000 },
++				{ 0 },
++				{ 320000000 },
++				{ 19200000, 75000000, 384000000, 538666667 },
++				{ 384000000 } },
++		.reg = { "vfe0" },
++		.interrupt = { "vfe0" },
++		.vfe = {
++			.line_num = 4,
++			.pd_name = "ife0",
++			.has_pd = true,
++			.hw_ops = &vfe_ops_170,
++			.formats_rdi = &vfe_formats_rdi_845,
++			.formats_pix = &vfe_formats_pix_845
++		}
++	},
++
++	/* VFE1 */
++	{
++		.regulators = {},
++		.clock = { "gcc_camera_axi", "gcc_camera_sf_axi", "camnoc_axi", "cpas_ahb", "slow_ahb_src",
++				"soc_ahb", "vfe1", "vfe1_axi",
++				"vfe1_src", "csi1",
++				"csi1_src"},
++		.clock_rate = { { 0 },
++				{ 0 },
++				{ 0 },
++				{ 0 },
++				{ 80000000 },
++				{ 0 },
++				{ 19200000, 100000000, 320000000, 404000000, 480000000, 600000000 },
++				{ 0 },
++				{ 320000000 },
++				{ 19200000, 75000000, 384000000, 538666667 },
++				{ 384000000 } },
++		.reg = { "vfe1" },
++		.interrupt = { "vfe1" },
++		.vfe = {
++			.line_num = 4,
++			.pd_name = "ife1",
++			.has_pd = true,
++			.hw_ops = &vfe_ops_170,
++			.formats_rdi = &vfe_formats_rdi_845,
++			.formats_pix = &vfe_formats_pix_845
++		}
++	},
++
++	/* VFE-lite */
++	{
++		.regulators = {},
++		.clock = { "gcc_camera_axi", "gcc_camera_sf_axi", "camnoc_axi", "cpas_ahb", "slow_ahb_src",
++				"soc_ahb", "vfe_lite",
++				"vfe_lite_src", "csi2",
++				"csi2_src"},
++		.clock_rate = { { 0 },
++				{ 0 },
++				{ 0 },
++				{ 0 },
++				{ 80000000 },
++				{ 0 },
++				{ 19200000, 100000000, 320000000, 404000000, 480000000, 600000000 },
++				{ 320000000 },
++				{ 19200000, 75000000, 384000000, 538666667 },
++				{ 384000000 } },
++		.reg = { "vfe_lite" },
++		.interrupt = { "vfe_lite" },
++		.vfe = {
++			.is_lite = true,
++			.line_num = 4,
++			.hw_ops = &vfe_ops_170,
++			.formats_rdi = &vfe_formats_rdi_845,
++			.formats_pix = &vfe_formats_pix_845
++		}
++	}
++};
++
++/* SM8150 (Surface Duo): Titan 175 = sdm845 layout + interconnect votes */
++static const struct camss_resources sm8150_resources = {
++	.version = CAMSS_845,
++	.pd_name = "top",
++	.csiphy_res = csiphy_res_845,
++	.csid_res = csid_res_845,
++	.vfe_res = vfe_res_8150,
++	.icc_res = icc_res_sm8250,
++	.icc_path_num = ARRAY_SIZE(icc_res_sm8250),
++	.csiphy_num = ARRAY_SIZE(csiphy_res_845),
++	.csid_num = ARRAY_SIZE(csid_res_845),
++	.vfe_num = ARRAY_SIZE(vfe_res_8150),
++};
++
+ static const struct camss_resources sm8250_resources = {
+ 	.version = CAMSS_8250,
+ 	.pd_name = "top",
+@@ -5759,6 +5866,7 @@ static const struct of_device_id camss_dt_match[] = {
+ 	{ .compatible = "qcom,sdm845-camss", .data = &sdm845_resources },
+ 	{ .compatible = "qcom,sm6150-camss", .data = &sm6150_resources },
+ 	{ .compatible = "qcom,sm6350-camss", .data = &sm6350_resources },
++	{ .compatible = "qcom,sm8150-camss", .data = &sm8150_resources },
+ 	{ .compatible = "qcom,sm8250-camss", .data = &sm8250_resources },
+ 	{ .compatible = "qcom,sm8550-camss", .data = &sm8550_resources },
+ 	{ .compatible = "qcom,sm8650-camss", .data = &sm8650_resources },
+diff --git a/drivers/media/platform/qcom/venus/core.c b/drivers/media/platform/qcom/venus/core.c
+index 2a0ab553c..570283e46 100644
+--- a/drivers/media/platform/qcom/venus/core.c
++++ b/drivers/media/platform/qcom/venus/core.c
+@@ -1056,6 +1056,15 @@ static const struct venus_resources sc7180_res = {
+ };
+ 
+ #if (!IS_ENABLED(CONFIG_VIDEO_QCOM_IRIS))
++/* SM8150_IRIS1 (Surface Duo): downstream qcom,allowed-clock-rates; bandwidth tables borrowed from SM8250 */
++static const struct freq_tbl sm8150_freq_table[] = {
++	{ 0, 533000000 },
++	{ 0, 444000000 },
++	{ 0, 365000000 },
++	{ 0, 338000000 },
++	{ 0, 240000000 },
++};
++
+ static const struct freq_tbl sm8250_freq_table[] = {
+ 	{ 0, 444000000 },
+ 	{ 0, 366000000 },
+@@ -1114,6 +1123,44 @@ static const struct venus_resources sm8250_res = {
+ 	.enc_nodename = "video-encoder",
+ };
+ 
++static const struct venus_resources sm8150_res = {
++	.freq_tbl = sm8150_freq_table,
++	.freq_tbl_size = ARRAY_SIZE(sm8150_freq_table),
++	.bw_tbl_enc = sm8250_bw_table_enc,
++	.bw_tbl_enc_size = ARRAY_SIZE(sm8250_bw_table_enc),
++	.bw_tbl_dec = sm8250_bw_table_dec,
++	.bw_tbl_dec_size = ARRAY_SIZE(sm8250_bw_table_dec),
++	/* downstream enables all three GCC video AXI clocks before the firmware boots */
++	/* downstream msm_vidc order: axic, axi0, axi1, then core */
++	.clks = {"axic", "iface", "axi1", "core"},
++	.clks_num = 4,
++	/* downstream asserts/deasserts all four before the clocks: video_axi(c), core, axi0, axi1 */
++	.resets = { "axic", "core", "axi0", "axi1" },
++	.resets_num = 4,
++	/* downstream vcodec_clk (MVS0) + cvp_clk (MVS1) together */
++	.vcodec0_clks = { "vcodec0_core", "vcodec1_core" },
++	.vcodec_clks_num = 2,
++	.vcodec_pmdomains = (const char *[]) { "venus", "vcodec0", "vcodec1" },
++	.vcodec_pmdomains_num = 3,
++	.opp_pmdomain = (const char *[]) { "mx" },
++	.vcodec_num = 1,
++	.max_load = 7833600,
++	.hfi_version = HFI_VERSION_4XX,
++	.vpu_version = VPU_VERSION_IRIS1,
++	.vmem_id = VIDC_RESOURCE_NONE,
++	.vmem_size = 0,
++	.vmem_addr = 0,
++	.dma_mask = 0xe0000000 - 1,
++	/* content-protection ranges for TZ (downstream __protect_cp_mem); sdm845 values */
++	.cp_start = 0,
++	.cp_size = 0x25800000,	/* downstream venus_ns pool START */
++	.cp_nonpixel_start = 0x1000000,
++	.cp_nonpixel_size = 0x24800000,
++	.fwname = "qcom/sm8150/venus.mbn",	/* the Duo's DT sets firmware-name */
++	.dec_nodename = "video-decoder",
++	.enc_nodename = "video-encoder",
++};
++
+ static const struct freq_tbl sc7280_freq_table[] = {
+ 	{ 0, 460000000 },
+ 	{ 0, 424000000 },
+@@ -1242,6 +1289,7 @@ static const struct of_device_id venus_dt_match[] = {
+ 	{ .compatible = "qcom,sdm845-venus-v2", .data = &sdm845_res_v2, },
+ #if (!IS_ENABLED(CONFIG_VIDEO_QCOM_IRIS))
+ 	{ .compatible = "qcom,sc7280-venus", .data = &sc7280_res, },
++	{ .compatible = "qcom,sm8150-venus", .data = &sm8150_res, },	/* SM8150_IRIS1 */
+ 	{ .compatible = "qcom,sm8250-venus", .data = &sm8250_res, },
+ #endif
+ 	{ }
+diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+index 93fa77f05..452f30924 100644
+--- a/drivers/media/platform/qcom/venus/core.h
++++ b/drivers/media/platform/qcom/venus/core.h
+@@ -26,7 +26,7 @@
+ 
+ #define VIDC_CLKS_NUM_MAX		4
+ #define VIDC_VCODEC_CLKS_NUM_MAX	2
+-#define VIDC_RESETS_NUM_MAX		2
++#define VIDC_RESETS_NUM_MAX		4	/* SM8150_IRIS1 resets 4 (downstream ahb2axi bridge) */
+ #define VIDC_MAX_HIER_CODING_LAYER 6
+ 
+ #define VENUS_MAX_FPS			240
+diff --git a/drivers/media/platform/qcom/venus/hfi_cmds.c b/drivers/media/platform/qcom/venus/hfi_cmds.c
+index 3ae063094..103531b2a 100644
+--- a/drivers/media/platform/qcom/venus/hfi_cmds.c
++++ b/drivers/media/platform/qcom/venus/hfi_cmds.c
+@@ -1289,6 +1289,13 @@ pkt_session_set_property_4xx(struct hfi_session_set_property_pkt *pkt,
+ 	case HFI_PROPERTY_PARAM_VENC_SESSION_QP_RANGE:
+ 		/* not implemented on Venus 4xx */
+ 		return -ENOTSUPP;
++	case HFI_PROPERTY_PARAM_WORK_ROUTE: {	/* downstream 4xx packetization has it */
++		struct hfi_video_work_route *in = pdata, *wr = prop_data;
++
++		wr->video_work_route = in->video_work_route;
++		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*wr);
++		break;
++	}
+ 	default:
+ 		return pkt_session_set_property_3xx(pkt, cookie, ptype, pdata);
+ 	}
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus.c b/drivers/media/platform/qcom/venus/hfi_venus.c
+index bd82066bb..330a0902f 100644
+--- a/drivers/media/platform/qcom/venus/hfi_venus.c
++++ b/drivers/media/platform/qcom/venus/hfi_venus.c
+@@ -11,6 +11,7 @@
+ #include <linux/iopoll.h>
+ #include <linux/kernel.h>
+ #include <linux/slab.h>
++#include <linux/soc/qcom/llcc-qcom.h>
+ 
+ #include "core.h"
+ #include "hfi_cmds.h"
+@@ -477,6 +478,9 @@ static int venus_boot_core(struct venus_hfi_device *hdev)
+ 		mask_val = readl(wrapper_base + WRAPPER_INTR_MASK);
+ 		mask_val &= ~(WRAPPER_INTR_MASK_A2HWD_BASK_V6 |
+ 			      WRAPPER_INTR_MASK_A2HCPU_MASK);
++	} else if (IS_IRIS1(hdev->core)) {	/* SM8150 (IRIS1): downstream interrupt_init_vpu5 (A2HWD is bit 4 here) */
++		mask_val = readl(wrapper_base + WRAPPER_INTR_MASK);
++		mask_val &= ~(0x10 | WRAPPER_INTR_MASK_A2HCPU_MASK);
+ 	} else {
+ 		mask_val = WRAPPER_INTR_MASK_A2HVCODEC_MASK;
+ 	}
+@@ -544,6 +548,13 @@ static int venus_run(struct venus_hfi_device *hdev)
+ 
+ 	writel(hdev->ifaceq_table.da, cpu_cs_base + UC_REGION_ADDR);
+ 	writel(SHARED_QSIZE, cpu_cs_base + UC_REGION_SIZE);
++	if (IS_IRIS1(hdev->core)) {	/* SM8150 (IRIS1): setup_dsp_uc_memmap_vpu5 + clock_config_on_enable_vpu5 */
++		writel(hdev->ifaceq_table.da, cpu_cs_base + 0x34);	/* HFI_DSP_QTBL_ADDR */
++		writel(hdev->ifaceq_table.da, cpu_cs_base + 0x38);	/* HFI_DSP_UC_REGION_ADDR */
++		writel(SHARED_QSIZE, cpu_cs_base + 0x3c);		/* HFI_DSP_UC_REGION_SIZE */
++		writel(0, hdev->core->wrapper_base + WRAPPER_CPU_CGC_DIS);
++		writel(0, hdev->core->wrapper_base + WRAPPER_CPU_CLOCK_CONFIG);
++	}
+ 	writel(hdev->ifaceq_table.da, cpu_cs_base + CPU_CS_SCIACMDARG2);
+ 	writel(0x01, cpu_cs_base + CPU_CS_SCIACMDARG1);
+ 	if (hdev->sfr.da)
+@@ -943,6 +954,46 @@ static int venus_get_queue_size(struct venus_hfi_device *hdev,
+ 	return abs(qhdr->read_idx - qhdr->write_idx);
+ }
+ 
++/* downstream __enable_subcaches + __set_subcaches (VPU5 = SM8150 IRIS1) */
++static void venus_iris1_set_syscache(struct venus_hfi_device *hdev)
++{
++	static const u32 uids[] = { LLCC_VIDSC0, LLCC_VIDSC1 };
++	struct device *dev = hdev->core->dev;
++	u32 buf[16] = { 0 };
++	struct hfi_sys_set_resource_pkt *pkt = (void *)buf;
++	u32 n = 0, i;
++	int ret;
++
++	for (i = 0; i < ARRAY_SIZE(uids); i++) {
++		struct llcc_slice_desc *d = llcc_slice_getd(uids[i]);
++
++		if (IS_ERR_OR_NULL(d)) {
++			dev_warn(dev, "llcc slice %u unavailable (%ld)\n", uids[i], PTR_ERR(d));
++			continue;
++		}
++		ret = llcc_slice_activate(d);
++		if (ret) {
++			dev_warn(dev, "llcc slice %u activate failed (%d)\n", uids[i], ret);
++			continue;
++		}
++		pkt->resource_data[1 + 2 * n] = llcc_get_slice_size(d);
++		pkt->resource_data[2 + 2 * n] = llcc_get_slice_id(d);
++		dev_dbg(dev, "syscache slice uid %u id %d size %zu KB\n", uids[i],
++			 llcc_get_slice_id(d), llcc_get_slice_size(d));
++		n++;
++	}
++	if (!n)
++		return;
++
++	pkt->hdr.size = sizeof(*pkt) + sizeof(u32) * (1 + 2 * n);
++	pkt->hdr.pkt_type = HFI_CMD_SYS_SET_RESOURCE;
++	pkt->resource_handle = 0x5ca1ab1e;
++	pkt->resource_type = 2;		/* HFI_RESOURCE_SYSCACHE */
++	pkt->resource_data[0] = n;
++	ret = venus_iface_cmdq_write(hdev, pkt, false);
++	dev_dbg(dev, "syscache set resource (%u slices) sent: %d\n", n, ret);
++}
++
+ static int venus_sys_set_default_properties(struct venus_hfi_device *hdev)
+ {
+ 	struct device *dev = hdev->core->dev;
+@@ -972,6 +1023,9 @@ static int venus_sys_set_default_properties(struct venus_hfi_device *hdev)
+ 			dev_warn(dev, "setting ubwc config failed (%d)\n", ret);
+ 	}
+ 
++	if (IS_IRIS1(hdev->core))
++		venus_iris1_set_syscache(hdev);
++
+ 	return ret;
+ }
+ 
+@@ -1616,6 +1670,8 @@ static int venus_suspend_3xx(struct venus_core *core)
+ 				 1500, 100 * 1500);
+ 	if (ret) {
+ 		dev_err(dev, "wait for cpu and video core idle fail (%d)\n", ret);
++		if (IS_IRIS1(core))	/* like downstream, skip PC while busy (retried later) */
++			return -EBUSY;
+ 		return ret;
+ 	}
+ 
+diff --git a/drivers/media/platform/qcom/venus/pm_helpers.c b/drivers/media/platform/qcom/venus/pm_helpers.c
+index e88e66be4..0490238ad 100644
+--- a/drivers/media/platform/qcom/venus/pm_helpers.c
++++ b/drivers/media/platform/qcom/venus/pm_helpers.c
+@@ -59,7 +59,8 @@ static int core_clks_enable(struct venus_core *core)
+ 	}
+ 
+ 	for (i = 0; i < res->clks_num; i++) {
+-		if (IS_V6(core) || (IS_V4(core) && is_lite(core))) {
++		/* SM8150 (IRIS1): the core clock has no rate after boot -> the ARM9 never ran */
++		if (IS_V6(core) || (IS_V4(core) && is_lite(core)) || IS_IRIS1(core)) {
+ 			ret = clk_set_rate(core->clks[i], freq);
+ 			if (ret)
+ 				goto err;
+@@ -1171,6 +1172,14 @@ static int core_power_v4(struct venus_core *core, int on)
+ 				return ret;
+ 			}
+ 		}
++		/* SM8150 (IRIS1): power VCODEC0 + VCODEC1 (downstream 'vcodec' + 'cvp' supplies) BEFORE the AXI clocks -
++		 * enabling GCC_VIDEO_AXIC with them off stalled the bus */
++		if (IS_IRIS1(core) && core->pmdomains) {
++			unsigned int d;
++
++			for (d = 1; d < core->pmdomains->num_pds; d++)
++				pm_runtime_get_sync(core->pmdomains->pd_devs[d]);
++		}
+ 
+ 		ret = core_resets_reset(core);
+ 		if (ret) {
+@@ -1180,6 +1189,12 @@ static int core_power_v4(struct venus_core *core, int on)
+ 		}
+ 
+ 		ret = core_clks_enable(core);
++		/* downstream runs vcodec_clk + cvp_clk with the core (encoder setup needs them) */
++		if (!ret && IS_IRIS1(core)) {
++			ret = vcodec_clks_enable(core, core->vcodec0_clks);
++			if (ret)
++				core_clks_disable(core);
++		}
+ 		if (ret < 0 && pmctrl)
+ 			pm_runtime_put_sync(pmctrl);
+ 	} else {
+@@ -1187,10 +1202,19 @@ static int core_power_v4(struct venus_core *core, int on)
+ 		if (core->opp_pmdomain)
+ 			dev_pm_opp_set_rate(dev, 0);
+ 
++		if (IS_IRIS1(core))
++			vcodec_clks_disable(core, core->vcodec0_clks);
+ 		core_clks_disable(core);
+ 
+ 		ret = core_resets_reset(core);
+ 
++		if (IS_IRIS1(core) && core->pmdomains) {	/* SM8150_IRIS1 */
++			unsigned int d;
++
++			for (d = 1; d < core->pmdomains->num_pds; d++)
++				pm_runtime_put_sync(core->pmdomains->pd_devs[d]);
++		}
++
+ 		if (pmctrl)
+ 			pm_runtime_put_sync(pmctrl);
+ 	}
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index d360808f8..f963af1b9 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -287,8 +287,19 @@ static int venc_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ 	format.fmt.pix_mp.height = orig_pixmp.height;
+ 	venc_try_fmt_common(inst, &format);
+ 
++	u32 prev_w = inst->width, prev_h = inst->height;
+ 	inst->width = format.fmt.pix_mp.width;
+ 	inst->height = format.fmt.pix_mp.height;
++	/* SM8150 (IRIS1): encode the requested size, not the 16-aligned buffer size (720 lines, not 736) */
++	if (IS_IRIS1(inst->core) && orig_pixmp.width && orig_pixmp.height) {
++		if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
++			inst->width = min_t(u32, ALIGN(orig_pixmp.width, 2), inst->width);
++			inst->height = min_t(u32, ALIGN(orig_pixmp.height, 2), inst->height);
++		} else if (prev_w && prev_h) {
++			inst->width = prev_w;
++			inst->height = prev_h;
++		}
++	}
+ 
+ 	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+ 		inst->fmt_out = fmt;
+@@ -679,6 +690,15 @@ static int venc_set_properties(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
++	/* SM8150 (IRIS1): the firmware wants a work route before the encoder properties (downstream sends 2) */
++	if (IS_IRIS1(inst->core)) {
++		struct hfi_video_work_route wr = { .video_work_route = 2 };
++
++		ret = hfi_session_set_property(inst, HFI_PROPERTY_PARAM_WORK_ROUTE, &wr);
++		if (ret)
++			return ret;
++	}
++
+ 	ptype = HFI_PROPERTY_CONFIG_FRAME_RATE;
+ 	frate.buffer_type = HFI_BUFFER_OUTPUT;
+ 	frate.framerate = inst->fps * (1 << 16);
+@@ -830,6 +850,9 @@ static int venc_set_properties(struct venus_inst *inst)
+ 	else if (ctr->bitrate_mode == V4L2_MPEG_VIDEO_BITRATE_MODE_CQ)
+ 		rate_control = HFI_RATE_CONTROL_CQ;
+ 
++	/* SM8150 (IRIS1): RATE_CONTROL = VBR_CFR hangs the firmware; CBR_CFR keeps the requested bitrate */
++	if (IS_IRIS1(inst->core) && rate_control == HFI_RATE_CONTROL_VBR_CFR)
++		rate_control = HFI_RATE_CONTROL_CBR_CFR;
+ 	ptype = HFI_PROPERTY_PARAM_VENC_RATE_CONTROL;
+ 	ret = hfi_session_set_property(inst, ptype, &rate_control);
+ 	if (ret)
+diff --git a/drivers/net/ipa/Makefile b/drivers/net/ipa/Makefile
+index e148ec3c1..025a3135f 100644
+--- a/drivers/net/ipa/Makefile
++++ b/drivers/net/ipa/Makefile
+@@ -2,12 +2,12 @@
+ #
+ # Makefile for the Qualcomm IPA driver.
+ 
+-IPA_REG_VERSIONS	:=	3.1 3.5.1 4.2 4.5 4.7 4.9 4.11 5.0 5.5
++IPA_REG_VERSIONS	:=	3.1 3.5.1 4.1 4.2 4.5 4.7 4.9 4.11 5.0 5.5
+ 
+ # Some IPA versions can reuse another set of GSI register definitions.
+ GSI_REG_VERSIONS	:=	3.1 3.5.1 4.0 4.5 4.9 4.11 5.0
+ 
+-IPA_DATA_VERSIONS	:=	3.1 3.5.1 4.2 4.5 4.7 4.9 4.11 5.0 5.2 5.5
++IPA_DATA_VERSIONS	:=	3.1 3.5.1 4.1 4.2 4.5 4.7 4.9 4.11 5.0 5.2 5.5
+ 
+ obj-$(CONFIG_QCOM_IPA)	+=	ipa.o
+ 
+diff --git a/drivers/net/ipa/data/ipa_data-v4.1.c b/drivers/net/ipa/data/ipa_data-v4.1.c
+new file mode 100644
+index 000000000..5a1b4f21e
+--- /dev/null
++++ b/drivers/net/ipa/data/ipa_data-v4.1.c
+@@ -0,0 +1,502 @@
++// SPDX-License-Identifier: GPL-2.0
++
++/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
++ * Copyright (C) 2019-2024 Linaro Ltd.
++ *
++ * IPA v4.1 (SM8150) configuration data. DRAFT, untested on hardware.
++ * Values come from the downstream msm-4.14 ipa_v3 driver (IPA_HW_v4_1 tables
++ * in ipa_utils.c: ipa3_ep_mapping, ipa3_rsrc_src/dst_grp_config,
++ * ipa3_qmb_outstanding, ipa_4_1_mem_part) and the SM8150 downstream DT
++ * (qcom,msm-bus vectors), laid out the way mainline v3.5.1/v4.2 do it.
++ * See docs/research/workbench/ipa-v4.1.md in surface-duo-windows.
++ */
++
++#include <linux/array_size.h>
++#include <linux/log2.h>
++
++#include "../ipa_data.h"
++#include "../ipa_endpoint.h"
++#include "../ipa_mem.h"
++#include "../ipa_version.h"
++
++/** enum ipa_resource_type - IPA resource types for an SoC having IPA v4.1 */
++enum ipa_resource_type {
++	/* Source resource types; first must have value 0 */
++	IPA_RESOURCE_TYPE_SRC_PKT_CONTEXTS		= 0,
++	IPA_RESOURCE_TYPE_SRC_DESCRIPTOR_LISTS,
++	IPA_RESOURCE_TYPE_SRC_DESCRIPTOR_BUFF,
++	IPA_RESOURCE_TYPE_SRC_HPS_DMARS,
++	IPA_RESOURCE_TYPE_SRC_ACK_ENTRIES,
++
++	/* Destination resource types; first must have value 0 */
++	IPA_RESOURCE_TYPE_DST_DATA_SECTORS		= 0,
++	IPA_RESOURCE_TYPE_DST_DPS_DMARS,
++};
++
++/* Resource groups used for an SoC having IPA v4.1 */
++enum ipa_rsrc_group_id {
++	/* Source resource group identifiers */
++	IPA_RSRC_GROUP_SRC_LWA_DL	= 0,
++	IPA_RSRC_GROUP_SRC_UL_DL,
++	IPA_RSRC_GROUP_SRC_UNUSED_2,
++	IPA_RSRC_GROUP_SRC_UC_RX_Q,
++	IPA_RSRC_GROUP_SRC_COUNT,	/* Last in set; not a source group */
++
++	/* Destination resource group identifiers */
++	IPA_RSRC_GROUP_DST_LWA_DL	= 0,
++	IPA_RSRC_GROUP_DST_UL_DL_DPL,
++	IPA_RSRC_GROUP_DST_UC,
++	IPA_RSRC_GROUP_DST_UNUSED_3,
++	IPA_RSRC_GROUP_DST_COUNT,	/* Last; not a destination group */
++};
++
++/* QSB configuration data for an SoC having IPA v4.1 */
++static const struct ipa_qsb_data ipa_qsb_data[] = {
++	[IPA_QSB_MASTER_DDR] = {
++		.max_writes	= 8,
++		.max_reads	= 12,
++		/* no outstanding read byte (beat) limit */
++	},
++	[IPA_QSB_MASTER_PCIE] = {
++		.max_writes	= 4,
++		.max_reads	= 12,
++	},
++};
++
++/* Endpoint configuration data for an SoC having IPA v4.1 */
++static const struct ipa_gsi_endpoint_data ipa_gsi_endpoint_data[] = {
++	[IPA_ENDPOINT_AP_COMMAND_TX] = {
++		.ee_id		= GSI_EE_AP,
++		.channel_id	= 4,
++		.endpoint_id	= 5,
++		.toward_ipa	= true,
++		.channel = {
++			.tre_count	= 256,
++			.event_count	= 256,
++			.tlv_count	= 20,
++		},
++		.endpoint = {
++			.config = {
++				.resource_group	= IPA_RSRC_GROUP_SRC_UL_DL,
++				.dma_mode	= true,
++				.dma_endpoint	= IPA_ENDPOINT_AP_LAN_RX,
++				.tx = {
++					.seq_type = IPA_SEQ_DMA,
++				},
++			},
++		},
++	},
++	[IPA_ENDPOINT_AP_LAN_RX] = {
++		.ee_id		= GSI_EE_AP,
++		.channel_id	= 5,
++		.endpoint_id	= 10,
++		.toward_ipa	= false,
++		.channel = {
++			.tre_count	= 256,
++			.event_count	= 256,
++			.tlv_count	= 9,
++		},
++		.endpoint = {
++			.config = {
++				.resource_group	= IPA_RSRC_GROUP_DST_UL_DL_DPL,
++				.aggregation	= true,
++				.status_enable	= true,
++				.rx = {
++					.buffer_size	= 8192,
++					.pad_align	= ilog2(sizeof(u32)),
++					.aggr_time_limit = 500,
++				},
++			},
++		},
++	},
++	[IPA_ENDPOINT_AP_MODEM_TX] = {
++		.ee_id		= GSI_EE_AP,
++		.channel_id	= 3,
++		.endpoint_id	= 2,
++		.toward_ipa	= true,
++		.channel = {
++			.tre_count	= 512,
++			.event_count	= 512,
++			.tlv_count	= 16,
++		},
++		.endpoint = {
++			.filter_support	= true,
++			.config = {
++				.resource_group	= IPA_RSRC_GROUP_SRC_UL_DL,
++				.checksum	= true,
++				.qmap		= true,
++				.status_enable	= true,
++				.tx = {
++					/* downstream: REP_2PKT_PROC_PASS_NO_DEC_UCP_DMAP */
++					.seq_type = IPA_SEQ_2_PASS_SKIP_LAST_UC,
++					.seq_rep_type = IPA_SEQ_REP_DMA_PARSER,
++					.status_endpoint =
++						IPA_ENDPOINT_MODEM_AP_RX,
++				},
++			},
++		},
++	},
++	[IPA_ENDPOINT_AP_MODEM_RX] = {
++		.ee_id		= GSI_EE_AP,
++		.channel_id	= 6,
++		.endpoint_id	= 11,
++		.toward_ipa	= false,
++		.channel = {
++			.tre_count	= 256,
++			.event_count	= 256,
++			.tlv_count	= 9,
++		},
++		.endpoint = {
++			.config = {
++				.resource_group	= IPA_RSRC_GROUP_DST_UL_DL_DPL,
++				.checksum	= true,
++				.qmap		= true,
++				.aggregation	= true,
++				.rx = {
++					.buffer_size	= 8192,
++					.aggr_time_limit = 500,
++					.aggr_close_eof	= true,
++				},
++			},
++		},
++	},
++	[IPA_ENDPOINT_MODEM_COMMAND_TX] = {
++		.ee_id		= GSI_EE_MODEM,
++		.channel_id	= 1,
++		.endpoint_id	= 4,
++		.toward_ipa	= true,
++	},
++	[IPA_ENDPOINT_MODEM_LAN_RX] = {
++		.ee_id		= GSI_EE_MODEM,
++		.channel_id	= 4,
++		.endpoint_id	= 14,
++		.toward_ipa	= false,
++	},
++	[IPA_ENDPOINT_MODEM_AP_TX] = {
++		.ee_id		= GSI_EE_MODEM,
++		.channel_id	= 0,
++		.endpoint_id	= 3,
++		.toward_ipa	= true,
++		.endpoint = {
++			.filter_support	= true,
++		},
++	},
++	[IPA_ENDPOINT_MODEM_AP_RX] = {
++		.ee_id		= GSI_EE_MODEM,
++		.channel_id	= 3,
++		.endpoint_id	= 13,
++		.toward_ipa	= false,
++	},
++};
++
++/* Source resource configuration data for an SoC having IPA v4.1 */
++static const struct ipa_resource ipa_resource_src[] = {
++	[IPA_RESOURCE_TYPE_SRC_PKT_CONTEXTS] = {
++		.limits[IPA_RSRC_GROUP_SRC_LWA_DL] = {
++			.min = 1,	.max = 63,
++		},
++		.limits[IPA_RSRC_GROUP_SRC_UL_DL] = {
++			.min = 1,	.max = 63,
++		},
++		.limits[IPA_RSRC_GROUP_SRC_UC_RX_Q] = {
++			.min = 1,	.max = 63,
++		},
++	},
++	[IPA_RESOURCE_TYPE_SRC_DESCRIPTOR_LISTS] = {
++		.limits[IPA_RSRC_GROUP_SRC_LWA_DL] = {
++			.min = 10,	.max = 10,
++		},
++		.limits[IPA_RSRC_GROUP_SRC_UL_DL] = {
++			.min = 10,	.max = 10,
++		},
++		.limits[IPA_RSRC_GROUP_SRC_UC_RX_Q] = {
++			.min = 8,	.max = 8,
++		},
++	},
++	[IPA_RESOURCE_TYPE_SRC_DESCRIPTOR_BUFF] = {
++		.limits[IPA_RSRC_GROUP_SRC_LWA_DL] = {
++			.min = 12,	.max = 12,
++		},
++		.limits[IPA_RSRC_GROUP_SRC_UL_DL] = {
++			.min = 14,	.max = 14,
++		},
++		.limits[IPA_RSRC_GROUP_SRC_UC_RX_Q] = {
++			.min = 8,	.max = 8,
++		},
++	},
++	[IPA_RESOURCE_TYPE_SRC_HPS_DMARS] = {
++		.limits[IPA_RSRC_GROUP_SRC_LWA_DL] = {
++			.min = 0,	.max = 63,
++		},
++		.limits[IPA_RSRC_GROUP_SRC_UL_DL] = {
++			.min = 0,	.max = 63,
++		},
++		.limits[IPA_RSRC_GROUP_SRC_UNUSED_2] = {
++			.min = 0,	.max = 63,
++		},
++		.limits[IPA_RSRC_GROUP_SRC_UC_RX_Q] = {
++			.min = 0,	.max = 63,
++		},
++	},
++	[IPA_RESOURCE_TYPE_SRC_ACK_ENTRIES] = {
++		.limits[IPA_RSRC_GROUP_SRC_LWA_DL] = {
++			.min = 14,	.max = 14,
++		},
++		.limits[IPA_RSRC_GROUP_SRC_UL_DL] = {
++			.min = 20,	.max = 20,
++		},
++		.limits[IPA_RSRC_GROUP_SRC_UC_RX_Q] = {
++			.min = 14,	.max = 14,
++		},
++	},
++};
++
++/* Destination resource configuration data for an SoC having IPA v4.1 */
++static const struct ipa_resource ipa_resource_dst[] = {
++	[IPA_RESOURCE_TYPE_DST_DATA_SECTORS] = {
++		.limits[IPA_RSRC_GROUP_DST_LWA_DL] = {
++			.min = 4,	.max = 4,
++		},
++		.limits[IPA_RSRC_GROUP_DST_UL_DL_DPL] = {
++			.min = 4,	.max = 4,
++		},
++		.limits[IPA_RSRC_GROUP_DST_UC] = {
++			.min = 3,	.max = 3,
++		},
++		.limits[IPA_RSRC_GROUP_DST_UNUSED_3] = {
++			.min = 2,	.max = 2,
++		},
++	},
++	[IPA_RESOURCE_TYPE_DST_DPS_DMARS] = {
++		.limits[IPA_RSRC_GROUP_DST_LWA_DL] = {
++			.min = 2,	.max = 63,
++		},
++		.limits[IPA_RSRC_GROUP_DST_UL_DL_DPL] = {
++			.min = 1,	.max = 63,
++		},
++		.limits[IPA_RSRC_GROUP_DST_UC] = {
++			.min = 1,	.max = 2,
++		},
++		.limits[IPA_RSRC_GROUP_DST_UNUSED_3] = {
++			.min = 0,	.max = 2,
++		},
++	},
++};
++
++/* Resource configuration data for an SoC having IPA v4.1 */
++static const struct ipa_resource_data ipa_resource_data = {
++	.rsrc_group_src_count	= IPA_RSRC_GROUP_SRC_COUNT,
++	.rsrc_group_dst_count	= IPA_RSRC_GROUP_DST_COUNT,
++	.resource_src_count	= ARRAY_SIZE(ipa_resource_src),
++	.resource_src		= ipa_resource_src,
++	.resource_dst_count	= ARRAY_SIZE(ipa_resource_dst),
++	.resource_dst		= ipa_resource_dst,
++};
++
++/* IPA-resident memory region data for an SoC having IPA v4.1
++ * (downstream ipa_4_1_mem_part; offsets relative to ofst_start 0x280,
++ * which mainline reads from the SHARED_MEM_SIZE register).
++ * A canary pair sits in each 8-byte gap the downstream layout leaves.
++ */
++static const struct ipa_mem ipa_mem_local_data[] = {
++	{
++		.id		= IPA_MEM_UC_SHARED,
++		.offset		= 0x0000,
++		.size		= 0x0080,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_UC_INFO,
++		.offset		= 0x0080,
++		.size		= 0x0200,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_V4_FILTER_HASHED,
++		.offset		= 0x0288,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V4_FILTER,
++		.offset		= 0x0308,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V6_FILTER_HASHED,
++		.offset		= 0x0388,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V6_FILTER,
++		.offset		= 0x0408,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V4_ROUTE_HASHED,
++		.offset		= 0x0488,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V4_ROUTE,
++		.offset		= 0x0508,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V6_ROUTE_HASHED,
++		.offset		= 0x0588,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_V6_ROUTE,
++		.offset		= 0x0608,
++		.size		= 0x0078,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_MODEM_HEADER,
++		.offset		= 0x0688,
++		.size		= 0x0140,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_MODEM_PROC_CTX,
++		.offset		= 0x07d0,
++		.size		= 0x0200,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_AP_PROC_CTX,
++		.offset		= 0x09d0,
++		.size		= 0x0200,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_PDN_CONFIG,
++		.offset		= 0x0bd8,
++		.size		= 0x0050,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_STATS_QUOTA_MODEM,
++		.offset		= 0x0c30,
++		.size		= 0x0060,
++		.canary_count	= 2,
++	},
++	{
++		.id		= IPA_MEM_STATS_TETHERING,
++		.offset		= 0x0c90,
++		.size		= 0x0140,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_STATS_V4_FILTER,
++		.offset		= 0x0dd0,
++		.size		= 0x0180,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_STATS_V6_FILTER,
++		.offset		= 0x0f50,
++		.size		= 0x0180,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_STATS_V4_ROUTE,
++		.offset		= 0x10d0,
++		.size		= 0x0180,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_STATS_V6_ROUTE,
++		.offset		= 0x1250,
++		.size		= 0x0180,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_STATS_DROP,
++		.offset		= 0x13d0,
++		.size		= 0x0020,
++		.canary_count	= 0,
++	},
++	{
++		.id		= IPA_MEM_MODEM,
++		.offset		= 0x13f0,
++		.size		= 0x100c,
++		.canary_count	= 0,
++	},
++	{
++		/* downstream uc_descriptor_ram; ends at end_ofst 0x2800,
++		 * so (like v3.5.1) there is no END_MARKER region.
++		 */
++		.id		= IPA_MEM_UC_EVENT_RING,
++		.offset		= 0x2400,
++		.size		= 0x0400,
++		.canary_count	= 1,
++	},
++};
++
++/* Memory configuration data for an SoC having IPA v4.1.
++ * IMEM: downstream ipa_smmu_ap "qcom,additional-mapping" 0x146bd000/0x2000
++ * (same as SDM845). SMEM: IPA_SMEM_SIZE 8 KB, as downstream.
++ */
++static const struct ipa_mem_data ipa_mem_data = {
++	.local_count	= ARRAY_SIZE(ipa_mem_local_data),
++	.local		= ipa_mem_local_data,
++	.imem_addr	= 0x146bd000,
++	.imem_size	= 0x00002000,
++	.smem_size	= 0x00002000,
++};
++
++/* Interconnect rates are in 1000 byte/second units (downstream DT
++ * qcom,msm-bus "SVS" case: IPA->EBI, IPA->IMEM, APPS->IPA_CFG).
++ */
++static const struct ipa_interconnect_data ipa_interconnect_data[] = {
++	{
++		.name			= "memory",
++		.peak_bandwidth		= 640000,	/* 640 MBps */
++		.average_bandwidth	= 80000,	/* 80 MBps */
++	},
++	/* Average bandwidth is unused for the next two interconnects */
++	{
++		.name			= "imem",
++		.peak_bandwidth		= 640000,	/* 640 MBps */
++		.average_bandwidth	= 0,		/* unused */
++	},
++	{
++		.name			= "config",
++		.peak_bandwidth		= 80000,	/* 80 MBps */
++		.average_bandwidth	= 0,		/* unused */
++	},
++};
++
++/* Clock and interconnect configuration data for an SoC having IPA v4.1 */
++static const struct ipa_power_data ipa_power_data = {
++	.core_clock_rate	= 125 * 1000 * 1000,	/* Hz (IPA_V4_0 SVS) */
++	.interconnect_count	= ARRAY_SIZE(ipa_interconnect_data),
++	.interconnect_data	= ipa_interconnect_data,
++};
++
++/* Configuration data for an SoC having IPA v4.1 */
++const struct ipa_data ipa_data_v4_1 = {
++	.version		= IPA_VERSION_4_1,
++	/* downstream IPA_BCR_REG_VAL_v4_0 = 0x39 */
++	.backward_compat	= BIT(BCR_CMDQ_L_LACK_ONE_ENTRY) |
++				  BIT(BCR_SUSPEND_L2_IRQ) |
++				  BIT(BCR_HOLB_DROP_L2_IRQ) |
++				  BIT(BCR_DUAL_TX),
++	.qsb_count		= ARRAY_SIZE(ipa_qsb_data),
++	.qsb_data		= ipa_qsb_data,
++	.modem_route_count	= 8,
++	.endpoint_count		= ARRAY_SIZE(ipa_gsi_endpoint_data),
++	.endpoint_data		= ipa_gsi_endpoint_data,
++	.resource_data		= &ipa_resource_data,
++	.mem_data		= &ipa_mem_data,
++	.power_data		= &ipa_power_data,
++};
+diff --git a/drivers/net/ipa/gsi_reg.c b/drivers/net/ipa/gsi_reg.c
+index e13cf835a..bad9fc86a 100644
+--- a/drivers/net/ipa/gsi_reg.c
++++ b/drivers/net/ipa/gsi_reg.c
+@@ -96,6 +96,7 @@ static const struct regs *gsi_regs(struct gsi *gsi)
+ 	case IPA_VERSION_3_5_1:
+ 		return &gsi_regs_v3_5_1;
+ 
++	case IPA_VERSION_4_1:
+ 	case IPA_VERSION_4_2:
+ 		return &gsi_regs_v4_0;
+ 
+diff --git a/drivers/net/ipa/ipa_data.h b/drivers/net/ipa/ipa_data.h
+index 3eb9dc2ce..20da2424b 100644
+--- a/drivers/net/ipa/ipa_data.h
++++ b/drivers/net/ipa/ipa_data.h
+@@ -247,6 +247,7 @@ struct ipa_data {
+ 
+ extern const struct ipa_data ipa_data_v3_1;
+ extern const struct ipa_data ipa_data_v3_5_1;
++extern const struct ipa_data ipa_data_v4_1;
+ extern const struct ipa_data ipa_data_v4_2;
+ extern const struct ipa_data ipa_data_v4_5;
+ extern const struct ipa_data ipa_data_v4_7;
+diff --git a/drivers/net/ipa/ipa_main.c b/drivers/net/ipa/ipa_main.c
+index 14ac2d2fa..26893aa87 100644
+--- a/drivers/net/ipa/ipa_main.c
++++ b/drivers/net/ipa/ipa_main.c
+@@ -648,6 +648,10 @@ static const struct of_device_id ipa_match[] = {
+ 		.compatible	= "qcom,sdm845-ipa",
+ 		.data		= &ipa_data_v3_5_1,
+ 	},
++	{
++		.compatible	= "qcom,sm8150-ipa",
++		.data		= &ipa_data_v4_1,
++	},
+ 	{
+ 		.compatible	= "qcom,sc7180-ipa",
+ 		.data		= &ipa_data_v4_2,
+diff --git a/drivers/net/ipa/ipa_reg.c b/drivers/net/ipa/ipa_reg.c
+index 30bd69f4c..06dffc071 100644
+--- a/drivers/net/ipa/ipa_reg.c
++++ b/drivers/net/ipa/ipa_reg.c
+@@ -114,6 +114,8 @@ static const struct regs *ipa_regs(enum ipa_version version)
+ 		return &ipa_regs_v3_1;
+ 	case IPA_VERSION_3_5_1:
+ 		return &ipa_regs_v3_5_1;
++	case IPA_VERSION_4_1:
++		return &ipa_regs_v4_1;
+ 	case IPA_VERSION_4_2:
+ 		return &ipa_regs_v4_2;
+ 	case IPA_VERSION_4_5:
+diff --git a/drivers/net/ipa/ipa_reg.h b/drivers/net/ipa/ipa_reg.h
+index 61b7c441a..8bf908ecf 100644
+--- a/drivers/net/ipa/ipa_reg.h
++++ b/drivers/net/ipa/ipa_reg.h
+@@ -631,6 +631,7 @@ enum ipa_reg_ipa_irq_uc_field_id {
+ 
+ extern const struct regs ipa_regs_v3_1;
+ extern const struct regs ipa_regs_v3_5_1;
++extern const struct regs ipa_regs_v4_1;
+ extern const struct regs ipa_regs_v4_2;
+ extern const struct regs ipa_regs_v4_5;
+ extern const struct regs ipa_regs_v4_7;
+diff --git a/drivers/net/ipa/reg/ipa_reg-v4.1.c b/drivers/net/ipa/reg/ipa_reg-v4.1.c
+new file mode 100644
+index 000000000..6577c5a8c
+--- /dev/null
++++ b/drivers/net/ipa/reg/ipa_reg-v4.1.c
+@@ -0,0 +1,480 @@
++// SPDX-License-Identifier: GPL-2.0
++
++/* Copyright (C) 2022-2024 Linaro Ltd. */
++
++#include <linux/array_size.h>
++#include <linux/bits.h>
++#include <linux/types.h>
++
++#include "../ipa_reg.h"
++#include "../ipa_version.h"
++
++static const u32 reg_comp_cfg_fmask[] = {
++						/* Bit 0 reserved */
++	[GSI_SNOC_BYPASS_DIS]				= BIT(1),
++	[GEN_QMB_0_SNOC_BYPASS_DIS]			= BIT(2),
++	[GEN_QMB_1_SNOC_BYPASS_DIS]			= BIT(3),
++	[IPA_DCMP_FAST_CLK_EN]				= BIT(4),
++	[IPA_QMB_SELECT_CONS_EN]			= BIT(5),
++	[IPA_QMB_SELECT_PROD_EN]			= BIT(6),
++	[GSI_MULTI_INORDER_RD_DIS]			= BIT(7),
++	[GSI_MULTI_INORDER_WR_DIS]			= BIT(8),
++	[GEN_QMB_0_MULTI_INORDER_RD_DIS]		= BIT(9),
++	[GEN_QMB_1_MULTI_INORDER_RD_DIS]		= BIT(10),
++	[GEN_QMB_0_MULTI_INORDER_WR_DIS]		= BIT(11),
++	[GEN_QMB_1_MULTI_INORDER_WR_DIS]		= BIT(12),
++	[GEN_QMB_0_SNOC_CNOC_LOOP_PROT_DIS]		= BIT(13),
++	[GSI_SNOC_CNOC_LOOP_PROT_DISABLE]		= BIT(14),
++	[GSI_MULTI_AXI_MASTERS_DIS]			= BIT(15),
++	[IPA_QMB_SELECT_GLOBAL_EN]			= BIT(16),
++	[ATOMIC_FETCHER_ARB_LOCK_DIS]			= GENMASK(20, 17),
++						/* Bits 21-31 reserved */
++};
++
++REG_FIELDS(COMP_CFG, comp_cfg, 0x0000003c);
++
++static const u32 reg_clkon_cfg_fmask[] = {
++	[CLKON_RX]					= BIT(0),
++	[CLKON_PROC]					= BIT(1),
++	[TX_WRAPPER]					= BIT(2),
++	[CLKON_MISC]					= BIT(3),
++	[RAM_ARB]					= BIT(4),
++	[FTCH_HPS]					= BIT(5),
++	[FTCH_DPS]					= BIT(6),
++	[CLKON_HPS]					= BIT(7),
++	[CLKON_DPS]					= BIT(8),
++	[RX_HPS_CMDQS]					= BIT(9),
++	[HPS_DPS_CMDQS]					= BIT(10),
++	[DPS_TX_CMDQS]					= BIT(11),
++	[RSRC_MNGR]					= BIT(12),
++	[CTX_HANDLER]					= BIT(13),
++	[ACK_MNGR]					= BIT(14),
++	[D_DCPH]					= BIT(15),
++	[H_DCPH]					= BIT(16),
++						/* Bit 17 reserved */
++	[NTF_TX_CMDQS]					= BIT(18),
++	[CLKON_TX_0]					= BIT(19),
++	[CLKON_TX_1]					= BIT(20),
++	[CLKON_FNR]					= BIT(21),
++	[QSB2AXI_CMDQ_L]				= BIT(22),
++	[AGGR_WRAPPER]					= BIT(23),
++	[RAM_SLAVEWAY]					= BIT(24),
++	[CLKON_QMB]					= BIT(25),
++	[WEIGHT_ARB]					= BIT(26),
++	[GSI_IF]					= BIT(27),
++	[CLKON_GLOBAL]					= BIT(28),
++	[GLOBAL_2X_CLK]					= BIT(29),
++						/* Bits 30-31 reserved */
++};
++
++REG_FIELDS(CLKON_CFG, clkon_cfg, 0x00000044);
++
++static const u32 reg_route_fmask[] = {
++	[ROUTE_DIS]					= BIT(0),
++	[ROUTE_DEF_PIPE]				= GENMASK(5, 1),
++	[ROUTE_DEF_HDR_TABLE]				= BIT(6),
++	[ROUTE_DEF_HDR_OFST]				= GENMASK(16, 7),
++	[ROUTE_FRAG_DEF_PIPE]				= GENMASK(21, 17),
++						/* Bits 22-23 reserved */
++	[ROUTE_DEF_RETAIN_HDR]				= BIT(24),
++						/* Bits 25-31 reserved */
++};
++
++REG_FIELDS(ROUTE, route, 0x00000048);
++
++static const u32 reg_shared_mem_size_fmask[] = {
++	[MEM_SIZE]					= GENMASK(15, 0),
++	[MEM_BADDR]					= GENMASK(31, 16),
++};
++
++REG_FIELDS(SHARED_MEM_SIZE, shared_mem_size, 0x00000054);
++
++static const u32 reg_qsb_max_writes_fmask[] = {
++	[GEN_QMB_0_MAX_WRITES]				= GENMASK(3, 0),
++	[GEN_QMB_1_MAX_WRITES]				= GENMASK(7, 4),
++						/* Bits 8-31 reserved */
++};
++
++REG_FIELDS(QSB_MAX_WRITES, qsb_max_writes, 0x00000074);
++
++static const u32 reg_qsb_max_reads_fmask[] = {
++	[GEN_QMB_0_MAX_READS]				= GENMASK(3, 0),
++	[GEN_QMB_1_MAX_READS]				= GENMASK(7, 4),
++						/* Bits 8-15 reserved */
++	[GEN_QMB_0_MAX_READS_BEATS]			= GENMASK(23, 16),
++	[GEN_QMB_1_MAX_READS_BEATS]			= GENMASK(31, 24),
++};
++
++REG_FIELDS(QSB_MAX_READS, qsb_max_reads, 0x00000078);
++
++static const u32 reg_filt_rout_hash_flush_fmask[] = {
++	[IPV6_ROUTER_HASH]				= BIT(0),
++						/* Bits 1-3 reserved */
++	[IPV6_FILTER_HASH]				= BIT(4),
++						/* Bits 5-7 reserved */
++	[IPV4_ROUTER_HASH]				= BIT(8),
++						/* Bits 9-11 reserved */
++	[IPV4_FILTER_HASH]				= BIT(12),
++						/* Bits 13-31 reserved */
++};
++
++REG_FIELDS(FILT_ROUT_HASH_FLUSH, filt_rout_hash_flush, 0x000014c);
++
++/* Valid bits defined by ipa->available */
++REG_STRIDE(STATE_AGGR_ACTIVE, state_aggr_active, 0x000000b4, 0x0004);
++
++REG(IPA_BCR, ipa_bcr, 0x000001d0);
++
++static const u32 reg_local_pkt_proc_cntxt_fmask[] = {
++	[IPA_BASE_ADDR]					= GENMASK(16, 0),
++						/* Bits 17-31 reserved */
++};
++
++/* Offset must be a multiple of 8 */
++REG_FIELDS(LOCAL_PKT_PROC_CNTXT, local_pkt_proc_cntxt, 0x000001e8);
++
++/* Valid bits defined by ipa->available */
++REG_STRIDE(AGGR_FORCE_CLOSE, aggr_force_close, 0x000001ec, 0x0004);
++
++static const u32 reg_counter_cfg_fmask[] = {
++						/* Bits 0-3 reserved */
++	[AGGR_GRANULARITY]				= GENMASK(8, 4),
++						/* Bits 9-31 reserved */
++};
++
++REG_FIELDS(COUNTER_CFG, counter_cfg, 0x000001f0);
++
++static const u32 reg_ipa_tx_cfg_fmask[] = {
++						/* Bits 0-1 reserved */
++	[PREFETCH_ALMOST_EMPTY_SIZE_TX0]		= GENMASK(5, 2),
++	[DMAW_SCND_OUTSD_PRED_THRESHOLD]		= GENMASK(9, 6),
++	[DMAW_SCND_OUTSD_PRED_EN]			= BIT(10),
++	[DMAW_MAX_BEATS_256_DIS]			= BIT(11),
++	[PA_MASK_EN]					= BIT(12),
++	[PREFETCH_ALMOST_EMPTY_SIZE_TX1]		= GENMASK(16, 13),
++						/* Bit 17 reserved */
++	[SSPND_PA_NO_START_STATE]			= BIT(18),
++	[SSPND_PA_NO_BQ_STATE]				= BIT(19),
++						/* Bits 20-31 reserved */
++};
++
++REG_FIELDS(IPA_TX_CFG, ipa_tx_cfg, 0x000001fc);
++
++static const u32 reg_flavor_0_fmask[] = {
++	[MAX_PIPES]					= GENMASK(3, 0),
++						/* Bits 4-7 reserved */
++	[MAX_CONS_PIPES]				= GENMASK(12, 8),
++						/* Bits 13-15 reserved */
++	[MAX_PROD_PIPES]				= GENMASK(20, 16),
++						/* Bits 21-23 reserved */
++	[PROD_LOWEST]					= GENMASK(27, 24),
++						/* Bits 28-31 reserved */
++};
++
++REG_FIELDS(FLAVOR_0, flavor_0, 0x00000210);
++
++static const u32 reg_idle_indication_cfg_fmask[] = {
++	[ENTER_IDLE_DEBOUNCE_THRESH]			= GENMASK(15, 0),
++	[CONST_NON_IDLE_ENABLE]				= BIT(16),
++						/* Bits 17-31 reserved */
++};
++
++REG_FIELDS(IDLE_INDICATION_CFG, idle_indication_cfg, 0x00000240);
++
++static const u32 reg_src_rsrc_grp_01_rsrc_type_fmask[] = {
++	[X_MIN_LIM]					= GENMASK(5, 0),
++						/* Bits 6-7 reserved */
++	[X_MAX_LIM]					= GENMASK(13, 8),
++						/* Bits 14-15 reserved */
++	[Y_MIN_LIM]					= GENMASK(21, 16),
++						/* Bits 22-23 reserved */
++	[Y_MAX_LIM]					= GENMASK(29, 24),
++						/* Bits 30-31 reserved */
++};
++
++REG_STRIDE_FIELDS(SRC_RSRC_GRP_01_RSRC_TYPE, src_rsrc_grp_01_rsrc_type,
++		  0x00000400, 0x0020);
++
++static const u32 reg_src_rsrc_grp_23_rsrc_type_fmask[] = {
++	[X_MIN_LIM]					= GENMASK(5, 0),
++						/* Bits 6-7 reserved */
++	[X_MAX_LIM]					= GENMASK(13, 8),
++						/* Bits 14-15 reserved */
++	[Y_MIN_LIM]					= GENMASK(21, 16),
++						/* Bits 22-23 reserved */
++	[Y_MAX_LIM]					= GENMASK(29, 24),
++						/* Bits 30-31 reserved */
++};
++
++REG_STRIDE_FIELDS(SRC_RSRC_GRP_23_RSRC_TYPE, src_rsrc_grp_23_rsrc_type,
++		  0x00000404, 0x0020);
++
++static const u32 reg_dst_rsrc_grp_01_rsrc_type_fmask[] = {
++	[X_MIN_LIM]					= GENMASK(5, 0),
++						/* Bits 6-7 reserved */
++	[X_MAX_LIM]					= GENMASK(13, 8),
++						/* Bits 14-15 reserved */
++	[Y_MIN_LIM]					= GENMASK(21, 16),
++						/* Bits 22-23 reserved */
++	[Y_MAX_LIM]					= GENMASK(29, 24),
++						/* Bits 30-31 reserved */
++};
++
++REG_STRIDE_FIELDS(DST_RSRC_GRP_01_RSRC_TYPE, dst_rsrc_grp_01_rsrc_type,
++		  0x00000500, 0x0020);
++
++static const u32 reg_dst_rsrc_grp_23_rsrc_type_fmask[] = {
++	[X_MIN_LIM]					= GENMASK(5, 0),
++						/* Bits 6-7 reserved */
++	[X_MAX_LIM]					= GENMASK(13, 8),
++						/* Bits 14-15 reserved */
++	[Y_MIN_LIM]					= GENMASK(21, 16),
++						/* Bits 22-23 reserved */
++	[Y_MAX_LIM]					= GENMASK(29, 24),
++						/* Bits 30-31 reserved */
++};
++
++REG_STRIDE_FIELDS(DST_RSRC_GRP_23_RSRC_TYPE, dst_rsrc_grp_23_rsrc_type,
++		  0x00000504, 0x0020);
++
++static const u32 reg_endp_init_ctrl_fmask[] = {
++	[ENDP_SUSPEND]					= BIT(0),
++	[ENDP_DELAY]					= BIT(1),
++						/* Bits 2-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_CTRL, endp_init_ctrl, 0x00000800, 0x0070);
++
++static const u32 reg_endp_init_cfg_fmask[] = {
++	[FRAG_OFFLOAD_EN]				= BIT(0),
++	[CS_OFFLOAD_EN]					= GENMASK(2, 1),
++	[CS_METADATA_HDR_OFFSET]			= GENMASK(6, 3),
++						/* Bit 7 reserved */
++	[CS_GEN_QMB_MASTER_SEL]				= BIT(8),
++						/* Bits 9-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_CFG, endp_init_cfg, 0x00000808, 0x0070);
++
++static const u32 reg_endp_init_nat_fmask[] = {
++	[NAT_EN]					= GENMASK(1, 0),
++						/* Bits 2-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_NAT, endp_init_nat, 0x0000080c, 0x0070);
++
++static const u32 reg_endp_init_hdr_fmask[] = {
++	[HDR_LEN]					= GENMASK(5, 0),
++	[HDR_OFST_METADATA_VALID]			= BIT(6),
++	[HDR_OFST_METADATA]				= GENMASK(12, 7),
++	[HDR_ADDITIONAL_CONST_LEN]			= GENMASK(18, 13),
++	[HDR_OFST_PKT_SIZE_VALID]			= BIT(19),
++	[HDR_OFST_PKT_SIZE]				= GENMASK(25, 20),
++	[HDR_A5_MUX]					= BIT(26),
++	[HDR_LEN_INC_DEAGG_HDR]				= BIT(27),
++	[HDR_METADATA_REG_VALID]			= BIT(28),
++						/* Bits 29-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_HDR, endp_init_hdr, 0x00000810, 0x0070);
++
++static const u32 reg_endp_init_hdr_ext_fmask[] = {
++	[HDR_ENDIANNESS]				= BIT(0),
++	[HDR_TOTAL_LEN_OR_PAD_VALID]			= BIT(1),
++	[HDR_TOTAL_LEN_OR_PAD]				= BIT(2),
++	[HDR_PAYLOAD_LEN_INC_PADDING]			= BIT(3),
++	[HDR_TOTAL_LEN_OR_PAD_OFFSET]			= GENMASK(9, 4),
++	[HDR_PAD_TO_ALIGNMENT]				= GENMASK(13, 10),
++						/* Bits 14-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_HDR_EXT, endp_init_hdr_ext, 0x00000814, 0x0070);
++
++REG_STRIDE(ENDP_INIT_HDR_METADATA_MASK, endp_init_hdr_metadata_mask,
++	   0x00000818, 0x0070);
++
++static const u32 reg_endp_init_mode_fmask[] = {
++	[ENDP_MODE]					= GENMASK(2, 0),
++						/* Bit 3 reserved */
++	[DEST_PIPE_INDEX]				= GENMASK(8, 4),
++						/* Bits 9-11 reserved */
++	[BYTE_THRESHOLD]				= GENMASK(27, 12),
++	[PIPE_REPLICATION_EN]				= BIT(28),
++	[PAD_EN]					= BIT(29),
++	[HDR_FTCH_DISABLE]				= BIT(30),
++						/* Bit 31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_MODE, endp_init_mode, 0x00000820, 0x0070);
++
++static const u32 reg_endp_init_aggr_fmask[] = {
++	[AGGR_EN]					= GENMASK(1, 0),
++	[AGGR_TYPE]					= GENMASK(4, 2),
++	[BYTE_LIMIT]					= GENMASK(9, 5),
++	[TIME_LIMIT]					= GENMASK(14, 10),
++	[PKT_LIMIT]					= GENMASK(20, 15),
++	[SW_EOF_ACTIVE]					= BIT(21),
++	[FORCE_CLOSE]					= BIT(22),
++						/* Bit 23 reserved */
++	[HARD_BYTE_LIMIT_EN]				= BIT(24),
++						/* Bits 25-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_AGGR, endp_init_aggr, 0x00000824, 0x0070);
++
++static const u32 reg_endp_init_hol_block_en_fmask[] = {
++	[HOL_BLOCK_EN]					= BIT(0),
++						/* Bits 1-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_HOL_BLOCK_EN, endp_init_hol_block_en,
++		  0x0000082c, 0x0070);
++
++static const u32 reg_endp_init_hol_block_timer_fmask[] = {
++	[TIMER_BASE_VALUE]				= GENMASK(4, 0),
++						/* Bits 5-7 reserved */
++	[TIMER_SCALE]					= GENMASK(12, 8),
++						/* Bits 9-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_HOL_BLOCK_TIMER, endp_init_hol_block_timer,
++		  0x00000830, 0x0070);
++
++static const u32 reg_endp_init_deaggr_fmask[] = {
++	[DEAGGR_HDR_LEN]				= GENMASK(5, 0),
++	[SYSPIPE_ERR_DETECTION]				= BIT(6),
++	[PACKET_OFFSET_VALID]				= BIT(7),
++	[PACKET_OFFSET_LOCATION]			= GENMASK(13, 8),
++	[IGNORE_MIN_PKT_ERR]				= BIT(14),
++						/* Bit 15 reserved */
++	[MAX_PACKET_LEN]				= GENMASK(31, 16),
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_DEAGGR, endp_init_deaggr, 0x00000834, 0x0070);
++
++static const u32 reg_endp_init_rsrc_grp_fmask[] = {
++	[ENDP_RSRC_GRP]					= GENMASK(1, 0),
++						/* Bits 1-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_RSRC_GRP, endp_init_rsrc_grp, 0x00000838, 0x0070);
++
++static const u32 reg_endp_init_seq_fmask[] = {
++	[SEQ_TYPE]					= GENMASK(7, 0),
++	[SEQ_REP_TYPE]					= GENMASK(15, 8),
++						/* Bits 16-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_INIT_SEQ, endp_init_seq, 0x0000083c, 0x0070);
++
++static const u32 reg_endp_status_fmask[] = {
++	[STATUS_EN]					= BIT(0),
++	[STATUS_ENDP]					= GENMASK(5, 1),
++						/* Bits 6-7 reserved */
++	[STATUS_LOCATION]				= BIT(8),
++	[STATUS_PKT_SUPPRESS]				= BIT(9),
++						/* Bits 10-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_STATUS, endp_status, 0x00000840, 0x0070);
++
++static const u32 reg_endp_filter_router_hsh_cfg_fmask[] = {
++	[FILTER_HASH_MSK_SRC_ID]			= BIT(0),
++	[FILTER_HASH_MSK_SRC_IP]			= BIT(1),
++	[FILTER_HASH_MSK_DST_IP]			= BIT(2),
++	[FILTER_HASH_MSK_SRC_PORT]			= BIT(3),
++	[FILTER_HASH_MSK_DST_PORT]			= BIT(4),
++	[FILTER_HASH_MSK_PROTOCOL]			= BIT(5),
++	[FILTER_HASH_MSK_METADATA]			= BIT(6),
++	[FILTER_HASH_MSK_ALL]				= GENMASK(6, 0),
++						/* Bits 7-15 reserved */
++	[ROUTER_HASH_MSK_SRC_ID]			= BIT(16),
++	[ROUTER_HASH_MSK_SRC_IP]			= BIT(17),
++	[ROUTER_HASH_MSK_DST_IP]			= BIT(18),
++	[ROUTER_HASH_MSK_SRC_PORT]			= BIT(19),
++	[ROUTER_HASH_MSK_DST_PORT]			= BIT(20),
++	[ROUTER_HASH_MSK_PROTOCOL]			= BIT(21),
++	[ROUTER_HASH_MSK_METADATA]			= BIT(22),
++	[ROUTER_HASH_MSK_ALL]				= GENMASK(22, 16),
++						/* Bits 23-31 reserved */
++};
++
++REG_STRIDE_FIELDS(ENDP_FILTER_ROUTER_HSH_CFG, endp_filter_router_hsh_cfg,
++		  0x0000085c, 0x0070);
++
++/* Valid bits defined by enum ipa_irq_id; only used for GSI_EE_AP */
++REG(IPA_IRQ_STTS, ipa_irq_stts, 0x00003008 + 0x1000 * GSI_EE_AP);
++
++/* Valid bits defined by enum ipa_irq_id; only used for GSI_EE_AP */
++REG(IPA_IRQ_EN, ipa_irq_en, 0x0000300c + 0x1000 * GSI_EE_AP);
++
++/* Valid bits defined by enum ipa_irq_id; only used for GSI_EE_AP */
++REG(IPA_IRQ_CLR, ipa_irq_clr, 0x00003010 + 0x1000 * GSI_EE_AP);
++
++static const u32 reg_ipa_irq_uc_fmask[] = {
++	[UC_INTR]					= BIT(0),
++						/* Bits 1-31 reserved */
++};
++
++REG_FIELDS(IPA_IRQ_UC, ipa_irq_uc, 0x0000301c + 0x1000 * GSI_EE_AP);
++
++/* Valid bits defined by ipa->available */
++REG_STRIDE(IRQ_SUSPEND_INFO, irq_suspend_info,
++	   0x00003030 + 0x1000 * GSI_EE_AP, 0x0004);
++
++/* Valid bits defined by ipa->available */
++REG_STRIDE(IRQ_SUSPEND_EN, irq_suspend_en,
++	   0x00003034 + 0x1000 * GSI_EE_AP, 0x0004);
++
++/* Valid bits defined by ipa->available */
++REG_STRIDE(IRQ_SUSPEND_CLR, irq_suspend_clr,
++	   0x00003038 + 0x1000 * GSI_EE_AP, 0x0004);
++
++static const struct reg *reg_array[] = {
++	[COMP_CFG]			= &reg_comp_cfg,
++	[CLKON_CFG]			= &reg_clkon_cfg,
++	[ROUTE]				= &reg_route,
++	[SHARED_MEM_SIZE]		= &reg_shared_mem_size,
++	[QSB_MAX_WRITES]		= &reg_qsb_max_writes,
++	[QSB_MAX_READS]			= &reg_qsb_max_reads,
++	[FILT_ROUT_HASH_FLUSH]		= &reg_filt_rout_hash_flush,
++	[STATE_AGGR_ACTIVE]		= &reg_state_aggr_active,
++	[IPA_BCR]			= &reg_ipa_bcr,
++	[LOCAL_PKT_PROC_CNTXT]		= &reg_local_pkt_proc_cntxt,
++	[AGGR_FORCE_CLOSE]		= &reg_aggr_force_close,
++	[COUNTER_CFG]			= &reg_counter_cfg,
++	[IPA_TX_CFG]			= &reg_ipa_tx_cfg,
++	[FLAVOR_0]			= &reg_flavor_0,
++	[IDLE_INDICATION_CFG]		= &reg_idle_indication_cfg,
++	[SRC_RSRC_GRP_01_RSRC_TYPE]	= &reg_src_rsrc_grp_01_rsrc_type,
++	[SRC_RSRC_GRP_23_RSRC_TYPE]	= &reg_src_rsrc_grp_23_rsrc_type,
++	[DST_RSRC_GRP_01_RSRC_TYPE]	= &reg_dst_rsrc_grp_01_rsrc_type,
++	[DST_RSRC_GRP_23_RSRC_TYPE]	= &reg_dst_rsrc_grp_23_rsrc_type,
++	[ENDP_INIT_CTRL]		= &reg_endp_init_ctrl,
++	[ENDP_INIT_CFG]			= &reg_endp_init_cfg,
++	[ENDP_INIT_NAT]			= &reg_endp_init_nat,
++	[ENDP_INIT_HDR]			= &reg_endp_init_hdr,
++	[ENDP_INIT_HDR_EXT]		= &reg_endp_init_hdr_ext,
++	[ENDP_INIT_HDR_METADATA_MASK]	= &reg_endp_init_hdr_metadata_mask,
++	[ENDP_INIT_MODE]		= &reg_endp_init_mode,
++	[ENDP_INIT_AGGR]		= &reg_endp_init_aggr,
++	[ENDP_INIT_HOL_BLOCK_EN]	= &reg_endp_init_hol_block_en,
++	[ENDP_INIT_HOL_BLOCK_TIMER]	= &reg_endp_init_hol_block_timer,
++	[ENDP_INIT_DEAGGR]		= &reg_endp_init_deaggr,
++	[ENDP_INIT_RSRC_GRP]		= &reg_endp_init_rsrc_grp,
++	[ENDP_INIT_SEQ]			= &reg_endp_init_seq,
++	[ENDP_STATUS]			= &reg_endp_status,
++	[ENDP_FILTER_ROUTER_HSH_CFG]	= &reg_endp_filter_router_hsh_cfg,
++	[IPA_IRQ_STTS]			= &reg_ipa_irq_stts,
++	[IPA_IRQ_EN]			= &reg_ipa_irq_en,
++	[IPA_IRQ_CLR]			= &reg_ipa_irq_clr,
++	[IPA_IRQ_UC]			= &reg_ipa_irq_uc,
++	[IRQ_SUSPEND_INFO]		= &reg_irq_suspend_info,
++	[IRQ_SUSPEND_EN]		= &reg_irq_suspend_en,
++	[IRQ_SUSPEND_CLR]		= &reg_irq_suspend_clr,
++};
++
++const struct regs ipa_regs_v4_1 = {
++	.reg_count	= ARRAY_SIZE(reg_array),
++	.reg		= reg_array,
++};
+diff --git a/drivers/power/supply/qcom_smbx.c b/drivers/power/supply/qcom_smbx.c
+index 8c9da47f4..2b699b284 100644
+--- a/drivers/power/supply/qcom_smbx.c
++++ b/drivers/power/supply/qcom_smbx.c
+@@ -23,38 +23,30 @@
+ #include <linux/types.h>
+ #include <linux/workqueue.h>
+ 
++enum smb_generation {
++	SMB2,
++	SMB5,
++};
++
++#define SMB_REG_OFFSET(smb) (smb->gen == SMB2 ? 0x600 : 0x100)
++
+ /* clang-format off */
+ #define BATTERY_CHARGER_STATUS_1			0x06
+-#define BVR_INITIAL_RAMP_BIT				BIT(7)
+-#define CC_SOFT_TERMINATE_BIT				BIT(6)
+-#define STEP_CHARGING_STATUS_SHIFT			3
+-#define STEP_CHARGING_STATUS_MASK			GENMASK(5, 3)
+ #define BATTERY_CHARGER_STATUS_MASK			GENMASK(2, 0)
+ 
+ #define BATTERY_CHARGER_STATUS_2			0x07
+-#define INPUT_CURRENT_LIMITED_BIT			BIT(7)
+-#define CHARGER_ERROR_STATUS_SFT_EXPIRE_BIT		BIT(6)
+-#define CHARGER_ERROR_STATUS_BAT_OV_BIT			BIT(5)
+-#define CHARGER_ERROR_STATUS_BAT_TERM_MISSING_BIT	BIT(4)
+-#define BAT_TEMP_STATUS_MASK				GENMASK(3, 0)
+-#define BAT_TEMP_STATUS_SOFT_LIMIT_MASK			GENMASK(3, 2)
+-#define BAT_TEMP_STATUS_HOT_SOFT_LIMIT_BIT		BIT(3)
+-#define BAT_TEMP_STATUS_COLD_SOFT_LIMIT_BIT		BIT(2)
+-#define BAT_TEMP_STATUS_TOO_HOT_BIT			BIT(1)
+-#define BAT_TEMP_STATUS_TOO_COLD_BIT			BIT(0)
+-
+-#define BATTERY_CHARGER_STATUS_4			0x0A
+-#define CHARGE_CURRENT_POST_JEITA_MASK			GENMASK(7, 0)
++#define SMB2_CHARGER_ERROR_STATUS_BAT_OV_BIT		BIT(5)
++#define SMB2_BAT_TEMP_STATUS_HOT_SOFT_LIMIT_BIT	BIT(3)
++#define SMB2_BAT_TEMP_STATUS_COLD_SOFT_LIMIT_BIT	BIT(2)
++#define SMB2_BAT_TEMP_STATUS_TOO_HOT_BIT		BIT(1)
++#define SMB5_CHARGER_ERROR_STATUS_BAT_OV_BIT		BIT(1)
++#define SMB2_BAT_TEMP_STATUS_TOO_COLD_BIT		BIT(0)
+ 
+ #define BATTERY_CHARGER_STATUS_7			0x0D
+-#define ENABLE_TRICKLE_BIT				BIT(7)
+-#define ENABLE_PRE_CHARGING_BIT				BIT(6)
+-#define ENABLE_FAST_CHARGING_BIT			BIT(5)
+-#define ENABLE_FULLON_MODE_BIT				BIT(4)
+-#define TOO_COLD_ADC_BIT				BIT(3)
+-#define TOO_HOT_ADC_BIT					BIT(2)
+-#define HOT_SL_ADC_BIT					BIT(1)
+-#define COLD_SL_ADC_BIT					BIT(0)
++#define SMB5_BAT_TEMP_STATUS_HOT_SOFT_BIT		BIT(5)
++#define SMB5_BAT_TEMP_STATUS_COLD_SOFT_BIT		BIT(4)
++#define SMB5_BAT_TEMP_STATUS_TOO_HOT_BIT		BIT(3)
++#define SMB5_BAT_TEMP_STATUS_TOO_COLD_BIT		BIT(2)
+ 
+ #define CHARGING_ENABLE_CMD				0x42
+ #define CHARGING_ENABLE_CMD_BIT				BIT(0)
+@@ -78,56 +70,21 @@
+ #define FLOAT_VOLTAGE_CFG				0x70
+ #define FLOAT_VOLTAGE_SETTING_MASK			GENMASK(7, 0)
+ 
+-#define FG_UPDATE_CFG_2_SEL				0x7D
+-#define SOC_LT_OTG_THRESH_SEL_BIT			BIT(3)
+-#define SOC_LT_CHG_RECHARGE_THRESH_SEL_BIT		BIT(2)
+-#define VBT_LT_CHG_RECHARGE_THRESH_SEL_BIT		BIT(1)
+-#define IBT_LT_CHG_TERM_THRESH_SEL_BIT			BIT(0)
+-
+-#define JEITA_EN_CFG					0x90
+-#define JEITA_EN_HARDLIMIT_BIT				BIT(4)
+-#define JEITA_EN_HOT_SL_FCV_BIT				BIT(3)
+-#define JEITA_EN_COLD_SL_FCV_BIT			BIT(2)
+-#define JEITA_EN_HOT_SL_CCC_BIT				BIT(1)
+-#define JEITA_EN_COLD_SL_CCC_BIT			BIT(0)
+-
+-#define INT_RT_STS					0x310
+-#define TYPE_C_CHANGE_RT_STS_BIT			BIT(7)
+-#define USBIN_ICL_CHANGE_RT_STS_BIT			BIT(6)
+-#define USBIN_SOURCE_CHANGE_RT_STS_BIT			BIT(5)
+-#define USBIN_PLUGIN_RT_STS_BIT				BIT(4)
+-#define USBIN_OV_RT_STS_BIT				BIT(3)
+-#define USBIN_UV_RT_STS_BIT				BIT(2)
+-#define USBIN_LT_3P6V_RT_STS_BIT			BIT(1)
+-#define USBIN_COLLAPSE_RT_STS_BIT			BIT(0)
++#define SMB2_FG_UPDATE_CFG_2_SEL			0x7D
++#define SMB2_SOC_LT_CHG_RECHARGE_THRESH_SEL_BIT		BIT(2)
++#define SMB2_VBT_LT_CHG_RECHARGE_THRESH_SEL_BIT		BIT(1)
++
++#define SMB5_CHARGE_RCHG_SOC_THRESHOLD_CFG_REG		0x7D
++#define SMB5_CHARGE_RCHG_SOC_THRESHOLD_CFG_MASK		GENMASK(7, 0)
+ 
+ #define OTG_CFG						0x153
+-#define OTG_RESERVED_MASK				GENMASK(7, 6)
+-#define DIS_OTG_ON_TLIM_BIT				BIT(5)
+-#define QUICKSTART_OTG_FASTROLESWAP_BIT			BIT(4)
+-#define INCREASE_DFP_TIME_BIT				BIT(3)
+-#define ENABLE_OTG_IN_DEBUG_MODE_BIT			BIT(2)
+ #define OTG_EN_SRC_CFG_BIT				BIT(1)
+-#define CONCURRENT_MODE_CFG_BIT				BIT(0)
+-
+-#define OTG_ENG_OTG_CFG					0x1C0
+-#define ENG_BUCKBOOST_HALT1_8_MODE_BIT			BIT(0)
+ 
+ #define APSD_STATUS					0x307
+-#define APSD_STATUS_7_BIT				BIT(7)
+-#define HVDCP_CHECK_TIMEOUT_BIT				BIT(6)
+-#define SLOW_PLUGIN_TIMEOUT_BIT				BIT(5)
+-#define ENUMERATION_DONE_BIT				BIT(4)
+-#define VADP_CHANGE_DONE_AFTER_AUTH_BIT			BIT(3)
+-#define QC_AUTH_DONE_STATUS_BIT				BIT(2)
+-#define QC_CHARGER_BIT					BIT(1)
+ #define APSD_DTC_STATUS_DONE_BIT			BIT(0)
+ 
+ #define APSD_RESULT_STATUS				0x308
+-#define ICL_OVERRIDE_LATCH_BIT				BIT(7)
+ #define APSD_RESULT_STATUS_MASK				GENMASK(6, 0)
+-#define QC_3P0_BIT					BIT(6)
+-#define QC_2P0_BIT					BIT(5)
+ #define FLOAT_CHARGER_BIT				BIT(4)
+ #define DCP_CHARGER_BIT					BIT(3)
+ #define CDP_CHARGER_BIT					BIT(2)
+@@ -137,213 +94,103 @@
+ #define USBIN_CMD_IL					0x340
+ #define USBIN_SUSPEND_BIT				BIT(0)
+ 
+-#define TYPE_C_STATUS_1					0x30B
+-#define UFP_TYPEC_MASK					GENMASK(7, 5)
+-#define UFP_TYPEC_RDSTD_BIT				BIT(7)
+-#define UFP_TYPEC_RD1P5_BIT				BIT(6)
+-#define UFP_TYPEC_RD3P0_BIT				BIT(5)
+-#define UFP_TYPEC_FMB_255K_BIT				BIT(4)
+-#define UFP_TYPEC_FMB_301K_BIT				BIT(3)
+-#define UFP_TYPEC_FMB_523K_BIT				BIT(2)
+-#define UFP_TYPEC_FMB_619K_BIT				BIT(1)
+-#define UFP_TYPEC_OPEN_OPEN_BIT				BIT(0)
+-
+-#define TYPE_C_STATUS_2					0x30C
+-#define DFP_RA_OPEN_BIT					BIT(7)
+-#define TIMER_STAGE_BIT					BIT(6)
+-#define EXIT_UFP_MODE_BIT				BIT(5)
+-#define EXIT_DFP_MODE_BIT				BIT(4)
+-#define DFP_TYPEC_MASK					GENMASK(3, 0)
+-#define DFP_RD_OPEN_BIT					BIT(3)
+-#define DFP_RD_RA_VCONN_BIT				BIT(2)
+-#define DFP_RD_RD_BIT					BIT(1)
+-#define DFP_RA_RA_BIT					BIT(0)
+-
+-#define TYPE_C_STATUS_3					0x30D
+-#define ENABLE_BANDGAP_BIT				BIT(7)
+-#define U_USB_GND_NOVBUS_BIT				BIT(6)
+-#define U_USB_FLOAT_NOVBUS_BIT				BIT(5)
+-#define U_USB_GND_BIT					BIT(4)
+-#define U_USB_FMB1_BIT					BIT(3)
+-#define U_USB_FLOAT1_BIT				BIT(2)
+-#define U_USB_FMB2_BIT					BIT(1)
+-#define U_USB_FLOAT2_BIT				BIT(0)
+-
+-#define TYPE_C_STATUS_4					0x30E
+-#define UFP_DFP_MODE_STATUS_BIT				BIT(7)
+-#define TYPEC_VBUS_STATUS_BIT				BIT(6)
+-#define TYPEC_VBUS_ERROR_STATUS_BIT			BIT(5)
+-#define TYPEC_DEBOUNCE_DONE_STATUS_BIT			BIT(4)
+-#define TYPEC_UFP_AUDIO_ADAPT_STATUS_BIT		BIT(3)
+-#define TYPEC_VCONN_OVERCURR_STATUS_BIT			BIT(2)
+-#define CC_ORIENTATION_BIT				BIT(1)
+-#define CC_ATTACHED_BIT					BIT(0)
+-
+-#define TYPE_C_STATUS_5					0x30F
+-#define TRY_SOURCE_FAILED_BIT				BIT(6)
+-#define TRY_SINK_FAILED_BIT				BIT(5)
+-#define TIMER_STAGE_2_BIT				BIT(4)
+-#define TYPEC_LEGACY_CABLE_STATUS_BIT			BIT(3)
+-#define TYPEC_NONCOMP_LEGACY_CABLE_STATUS_BIT		BIT(2)
+-#define TYPEC_TRYSOURCE_DETECT_STATUS_BIT		BIT(1)
+-#define TYPEC_TRYSINK_DETECT_STATUS_BIT			BIT(0)
+-
+ #define CMD_APSD					0x341
+-#define ICL_OVERRIDE_BIT				BIT(1)
+ #define APSD_RERUN_BIT					BIT(0)
+ 
++#define CMD_ICL_OVERRIDE				0x342
++#define ICL_OVERRIDE_BIT				BIT(0)
++
+ #define TYPE_C_CFG					0x358
+ #define APSD_START_ON_CC_BIT				BIT(7)
+-#define WAIT_FOR_APSD_BIT				BIT(6)
+ #define FACTORY_MODE_DETECTION_EN_BIT			BIT(5)
+-#define FACTORY_MODE_ICL_3A_4A_BIT			BIT(4)
+-#define FACTORY_MODE_DIS_CHGING_CFG_BIT			BIT(3)
+-#define SUSPEND_NON_COMPLIANT_CFG_BIT			BIT(2)
+ #define VCONN_OC_CFG_BIT				BIT(1)
+-#define TYPE_C_OR_U_USB_BIT				BIT(0)
+-
+-#define TYPE_C_CFG_2					0x359
+-#define TYPE_C_DFP_CURRSRC_MODE_BIT			BIT(7)
+-#define DFP_CC_1P4V_OR_1P6V_BIT				BIT(6)
+-#define VCONN_SOFTSTART_CFG_MASK			GENMASK(5, 4)
+-#define EN_TRY_SOURCE_MODE_BIT				BIT(3)
+-#define USB_FACTORY_MODE_ENABLE_BIT			BIT(2)
+-#define TYPE_C_UFP_MODE_BIT				BIT(1)
+-#define EN_80UA_180UA_CUR_SOURCE_BIT			BIT(0)
+-
+-#define TYPE_C_CFG_3					0x35A
+-#define TVBUS_DEBOUNCE_BIT				BIT(7)
+-#define TYPEC_LEGACY_CABLE_INT_EN_BIT			BIT(6)
+-#define TYPEC_NONCOMPLIANT_LEGACY_CABLE_INT_EN_B	BIT(5)
+-#define TYPEC_TRYSOURCE_DETECT_INT_EN_BIT		BIT(4)
+-#define TYPEC_TRYSINK_DETECT_INT_EN_BIT			BIT(3)
+-#define EN_TRYSINK_MODE_BIT				BIT(2)
+-#define EN_LEGACY_CABLE_DETECTION_BIT			BIT(1)
+-#define ALLOW_PD_DRING_UFP_TCCDB_BIT			BIT(0)
+ 
+ #define USBIN_OPTIONS_1_CFG				0x362
+-#define CABLE_R_SEL_BIT					BIT(7)
+-#define HVDCP_AUTH_ALG_EN_CFG_BIT			BIT(6)
+-#define HVDCP_AUTONOMOUS_MODE_EN_CFG_BIT		BIT(5)
+-#define INPUT_PRIORITY_BIT				BIT(4)
+ #define AUTO_SRC_DETECT_BIT				BIT(3)
+ #define HVDCP_EN_BIT					BIT(2)
+-#define VADP_INCREMENT_VOLTAGE_LIMIT_BIT		BIT(1)
+-#define VADP_TAPER_TIMER_EN_BIT				BIT(0)
+-
+-#define USBIN_OPTIONS_2_CFG				0x363
+-#define WIPWR_RST_EUD_CFG_BIT				BIT(7)
+-#define SWITCHER_START_CFG_BIT				BIT(6)
+-#define DCD_TIMEOUT_SEL_BIT				BIT(5)
+-#define OCD_CURRENT_SEL_BIT				BIT(4)
+-#define SLOW_PLUGIN_TIMER_EN_CFG_BIT			BIT(3)
+-#define FLOAT_OPTIONS_MASK				GENMASK(2, 0)
+-#define FLOAT_DIS_CHGING_CFG_BIT			BIT(2)
+-#define SUSPEND_FLOAT_CFG_BIT				BIT(1)
+-#define FORCE_FLOAT_SDP_CFG_BIT				BIT(0)
+-
+-#define TAPER_TIMER_SEL_CFG				0x364
+-#define TYPEC_SPARE_CFG_BIT				BIT(7)
+-#define TYPEC_DRP_DFP_TIME_CFG_BIT			BIT(5)
+-#define TAPER_TIMER_SEL_MASK				GENMASK(1, 0)
+-
+-#define USBIN_LOAD_CFG					0x365
+-#define USBIN_OV_CH_LOAD_OPTION_BIT			BIT(7)
++
++#define USBIN_LOAD_CFG					0x65
+ #define ICL_OVERRIDE_AFTER_APSD_BIT			BIT(4)
+ 
+ #define USBIN_ICL_OPTIONS				0x366
+-#define CFG_USB3P0_SEL_BIT				BIT(2)
+ #define USB51_MODE_BIT					BIT(1)
+ #define USBIN_MODE_CHG_BIT				BIT(0)
+ 
++/* PMI8998 only */
+ #define TYPE_C_INTRPT_ENB_SOFTWARE_CTRL			0x368
+-#define EXIT_SNK_BASED_ON_CC_BIT			BIT(7)
+-#define VCONN_EN_ORIENTATION_BIT			BIT(6)
+-#define TYPEC_VCONN_OVERCURR_INT_EN_BIT			BIT(5)
+-#define VCONN_EN_SRC_BIT				BIT(4)
++#define SMB2_VCONN_EN_SRC_BIT				BIT(4)
+ #define VCONN_EN_VALUE_BIT				BIT(3)
+ #define TYPEC_POWER_ROLE_CMD_MASK			GENMASK(2, 0)
+-#define UFP_EN_CMD_BIT					BIT(2)
+-#define DFP_EN_CMD_BIT					BIT(1)
+-#define TYPEC_DISABLE_CMD_BIT				BIT(0)
++#define SMB5_EN_SNK_ONLY_BIT				BIT(1)
+ 
+ #define USBIN_CURRENT_LIMIT_CFG				0x370
+-#define USBIN_CURRENT_LIMIT_MASK			GENMASK(7, 0)
+ 
+ #define USBIN_AICL_OPTIONS_CFG				0x380
+ #define SUSPEND_ON_COLLAPSE_USBIN_BIT			BIT(7)
+-#define USBIN_AICL_HDC_EN_BIT				BIT(6)
+ #define USBIN_AICL_START_AT_MAX_BIT			BIT(5)
+-#define USBIN_AICL_RERUN_EN_BIT				BIT(4)
++#define USBIN_AICL_PERIODIC_RERUN_EN_BIT		BIT(4)
+ #define USBIN_AICL_ADC_EN_BIT				BIT(3)
+ #define USBIN_AICL_EN_BIT				BIT(2)
+ #define USBIN_HV_COLLAPSE_RESPONSE_BIT			BIT(1)
+ #define USBIN_LV_COLLAPSE_RESPONSE_BIT			BIT(0)
+ 
++// FIXME: drop these and their programming, no need to set min to 4.3v
+ #define USBIN_5V_AICL_THRESHOLD_CFG			0x381
+ #define USBIN_5V_AICL_THRESHOLD_CFG_MASK		GENMASK(2, 0)
+ 
+ #define USBIN_CONT_AICL_THRESHOLD_CFG			0x384
+ #define USBIN_CONT_AICL_THRESHOLD_CFG_MASK		GENMASK(5, 0)
+ 
+-#define DC_ENG_SSUPPLY_CFG2				0x4C1
+-#define ENG_SSUPPLY_IVREF_OTG_SS_MASK			GENMASK(2, 0)
+-#define OTG_SS_SLOW					0x3
+-
+-#define DCIN_AICL_REF_SEL_CFG				0x481
+-#define DCIN_CONT_AICL_THRESHOLD_CFG_MASK		GENMASK(5, 0)
+-
+-#define WI_PWR_OPTIONS					0x495
+-#define CHG_OK_BIT					BIT(7)
+-#define WIPWR_UVLO_IRQ_OPT_BIT				BIT(6)
+-#define BUCK_HOLDOFF_ENABLE_BIT				BIT(5)
+-#define CHG_OK_HW_SW_SELECT_BIT				BIT(4)
+-#define WIPWR_RST_ENABLE_BIT				BIT(3)
+-#define DCIN_WIPWR_IRQ_SELECT_BIT			BIT(2)
+-#define AICL_SWITCH_ENABLE_BIT				BIT(1)
+-#define ZIN_ICL_ENABLE_BIT				BIT(0)
+-
+-#define ICL_STATUS					0x607
++#define ICL_STATUS(smb)					(SMB_REG_OFFSET(smb) + 0x07)
+ #define INPUT_CURRENT_LIMIT_MASK			GENMASK(7, 0)
+ 
+-#define POWER_PATH_STATUS				0x60B
+-#define P_PATH_INPUT_SS_DONE_BIT			BIT(7)
+-#define P_PATH_USBIN_SUSPEND_STS_BIT			BIT(6)
+-#define P_PATH_DCIN_SUSPEND_STS_BIT			BIT(5)
++#define POWER_PATH_STATUS(smb)				(SMB_REG_OFFSET(smb) + 0x0B)
+ #define P_PATH_USE_USBIN_BIT				BIT(4)
+-#define P_PATH_USE_DCIN_BIT				BIT(3)
+-#define P_PATH_POWER_PATH_MASK				GENMASK(2, 1)
+ #define P_PATH_VALID_INPUT_POWER_SOURCE_STS_BIT		BIT(0)
+ 
++/* 0x5xx region is PM8150b only Type-C registers */
++
++/* Bits 2:0 match PMI8998 TYPE_C_INTRPT_ENB_SOFTWARE_CTRL */
++#define SMB5_TYPE_C_MODE_CFG				0x544
++#define SMB5_EN_TRY_SNK_BIT				BIT(4)
++#define SMB5_EN_SNK_ONLY_BIT				BIT(1)
++
++#define SMB5_TYPEC_TYPE_C_VCONN_CONTROL			0x546
++#define SMB5_VCONN_EN_ORIENTATION_BIT			BIT(2)
++#define SMB5_VCONN_EN_VALUE_BIT				BIT(1)
++#define SMB5_VCONN_EN_SRC_BIT				BIT(0)
++
++
++#define SMB5_TYPE_C_DEBUG_ACCESS_SINK			0x54a
++#define SMB5_TYPEC_DEBUG_ACCESS_SINK_MASK		GENMASK(4, 0)
++
++#define SMB5_DEBUG_ACCESS_SRC_CFG			0x54C
++#define SMB5_EN_UNORIENTED_DEBUG_ACCESS_SRC_BIT	BIT(0)
++
++#define SMB5_TYPE_C_EXIT_STATE_CFG			0x550
++#define SMB5_BYPASS_VSAFE0V_DURING_ROLE_SWAP_BIT	BIT(3)
++#define SMB5_SEL_SRC_UPPER_REF_BIT			BIT(2)
++#define SMB5_EXIT_SNK_BASED_ON_CC_BIT			BIT(0)
++
++/* Common */
++
+ #define BARK_BITE_WDOG_PET				0x643
+ #define BARK_BITE_WDOG_PET_BIT				BIT(0)
+ 
+ #define WD_CFG						0x651
+ #define WATCHDOG_TRIGGER_AFP_EN_BIT			BIT(7)
+ #define BARK_WDOG_INT_EN_BIT				BIT(6)
+-#define BITE_WDOG_INT_EN_BIT				BIT(5)
+-#define SFT_AFTER_WDOG_IRQ_MASK				GENMASK(4, 3)
+-#define WDOG_IRQ_SFT_BIT				BIT(2)
+ #define WDOG_TIMER_EN_ON_PLUGIN_BIT			BIT(1)
+-#define WDOG_TIMER_EN_BIT				BIT(0)
+ 
+ #define SNARL_BARK_BITE_WD_CFG				0x653
+-#define BITE_WDOG_DISABLE_CHARGING_CFG_BIT		BIT(7)
+-#define SNARL_WDOG_TIMEOUT_MASK				GENMASK(6, 4)
+-#define BARK_WDOG_TIMEOUT_MASK				GENMASK(3, 2)
+-#define BITE_WDOG_TIMEOUT_MASK				GENMASK(1, 0)
+ 
+ #define AICL_RERUN_TIME_CFG				0x661
+ #define AICL_RERUN_TIME_MASK				GENMASK(1, 0)
++#define AIC_RERUN_TIME_3_SECS				0x0
+ 
++/* FIXME: probably remove this so we get parallel charging? */
+ #define STAT_CFG					0x690
+-#define STAT_SW_OVERRIDE_VALUE_BIT			BIT(7)
+ #define STAT_SW_OVERRIDE_CFG_BIT			BIT(6)
+-#define STAT_PARALLEL_OFF_DG_CFG_MASK			GENMASK(5, 4)
+-#define STAT_POLARITY_CFG_BIT				BIT(3)
+-#define STAT_PARALLEL_CFG_BIT				BIT(2)
+-#define STAT_FUNCTION_CFG_BIT				BIT(1)
+-#define STAT_IRQ_PULSING_EN_BIT				BIT(0)
+ 
+ #define SDP_CURRENT_UA					500000
+ #define CDP_CURRENT_UA					1500000
+@@ -352,9 +199,6 @@
+ 
+ /* pmi8998 registers represent current in increments of 1/40th of an amp */
+ #define CURRENT_SCALE_FACTOR				25000
+-#define SMB2_FLOAT_VOLTAGE_MIN_UV			3487500
+-#define SMB2_FLOAT_VOLTAGE_MAX_UV			4920000
+-#define SMB2_FLOAT_VOLTAGE_STEP_UV			7500
+ /* clang-format on */
+ 
+ enum charger_status {
+@@ -381,7 +225,6 @@ struct smb_init_register {
+  * @base:		Base address for smb registers
+  * @regmap:		Register map
+  * @batt_info:		Battery data from DT
+- * @initial_charge_enable: Charging enable state before hardware setup
+  * @status_change_work: Worker to handle plug/unplug events
+  * @cable_irq:		USB plugin IRQ
+  * @wakeup_enabled:	If the cable IRQ will cause a wakeup
+@@ -395,7 +238,7 @@ struct smb_chip {
+ 	unsigned int base;
+ 	struct regmap *regmap;
+ 	struct power_supply_battery_info *batt_info;
+-	u8 initial_charge_enable;
++	enum smb_generation gen;
+ 
+ 	struct delayed_work status_change_work;
+ 	int cable_irq;
+@@ -407,6 +250,13 @@ struct smb_chip {
+ 	struct power_supply *chg_psy;
+ };
+ 
++struct smb_match_data {
++	const char *name;
++	enum smb_generation gen;
++	size_t init_seq_len;
++	const struct smb_init_register __counted_by(init_seq_len) *init_seq;
++};
++
+ static enum power_supply_property smb_properties[] = {
+ 	POWER_SUPPLY_PROP_MANUFACTURER,
+ 	POWER_SUPPLY_PROP_MODEL_NAME,
+@@ -426,7 +276,7 @@ static int smb_get_prop_usb_online(struct smb_chip *chip, int *val)
+ 	unsigned int stat;
+ 	int rc;
+ 
+-	rc = regmap_read(chip->regmap, chip->base + POWER_PATH_STATUS, &stat);
++	rc = regmap_read(chip->regmap, chip->base + POWER_PATH_STATUS(chip), &stat);
+ 	if (rc < 0) {
+ 		dev_err(chip->dev, "Couldn't read power path status: %d\n", rc);
+ 		return rc;
+@@ -481,9 +331,35 @@ static int smb_apsd_get_charger_type(struct smb_chip *chip, int *val)
+ 	return 0;
+ }
+ 
++/* Return 1 when in overvoltage state, else 0 or -errno */
++static int smbx_ov_status(struct smb_chip *chip)
++{
++	u16 reg;
++	u8 mask;
++	int rc;
++	u32 val;
++
++	switch (chip->gen) {
++	case SMB2:
++		reg = BATTERY_CHARGER_STATUS_2;
++		mask = SMB2_CHARGER_ERROR_STATUS_BAT_OV_BIT;
++		break;
++	case SMB5:
++		reg = BATTERY_CHARGER_STATUS_7;
++		mask = SMB5_CHARGER_ERROR_STATUS_BAT_OV_BIT;
++		break;
++	}
++
++	rc = regmap_read(chip->regmap, chip->base + reg, &val);
++	if (rc)
++		return rc;
++
++	return !!(reg & mask);
++}
++
+ static int smb_get_prop_status(struct smb_chip *chip, int *val)
+ {
+-	unsigned char stat[2];
++	u32 stat;
+ 	int usb_online = 0;
+ 	int rc;
+ 
+@@ -493,22 +369,27 @@ static int smb_get_prop_status(struct smb_chip *chip, int *val)
+ 		return rc;
+ 	}
+ 
+-	rc = regmap_bulk_read(chip->regmap,
+-			      chip->base + BATTERY_CHARGER_STATUS_1, &stat, 2);
++	rc = regmap_read(chip->regmap,
++			      chip->base + BATTERY_CHARGER_STATUS_1, &stat);
+ 	if (rc < 0) {
+ 		dev_err(chip->dev, "Failed to read charging status ret=%d\n",
+ 			rc);
+ 		return rc;
+ 	}
+ 
+-	if (stat[1] & CHARGER_ERROR_STATUS_BAT_OV_BIT) {
++	rc = smbx_ov_status(chip);
++	if (rc < 0)
++		return rc;
++
++	/* In overvoltage state */
++	if (rc == 1) {
+ 		*val = POWER_SUPPLY_STATUS_NOT_CHARGING;
+ 		return 0;
+ 	}
+ 
+-	stat[0] = stat[0] & BATTERY_CHARGER_STATUS_MASK;
++	stat = stat & BATTERY_CHARGER_STATUS_MASK;
+ 
+-	switch (stat[0]) {
++	switch (stat) {
+ 	case TRICKLE_CHARGE:
+ 	case PRE_CHARGE:
+ 	case FAST_CHARGE:
+@@ -532,7 +413,7 @@ static int smb_get_prop_status(struct smb_chip *chip, int *val)
+ static inline int smb_get_current_limit(struct smb_chip *chip,
+ 					 unsigned int *val)
+ {
+-	int rc = regmap_read(chip->regmap, chip->base + ICL_STATUS, val);
++	int rc = regmap_read(chip->regmap, chip->base + ICL_STATUS(chip), val);
+ 
+ 	if (rc >= 0)
+ 		*val *= CURRENT_SCALE_FACTOR;
+@@ -632,7 +513,44 @@ static int smb_get_iio_chan(struct smb_chip *chip, struct iio_channel *chan,
+ 	return iio_read_channel_processed(chan, val);
+ }
+ 
+-static int smb_get_prop_health(struct smb_chip *chip, int *val)
++static int smb5_get_prop_health(struct smb_chip *chip, int *val)
++{
++	int rc;
++	unsigned int stat;
++
++	rc = smbx_ov_status(chip);
++
++	/* Treat any error as if we are in the overvoltage state */
++	if (rc < 0)
++		dev_err(chip->dev, "Couldn't determine overvoltage status!");
++	if (rc) {
++		dev_err(chip->dev, "battery over-voltage");
++		*val = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
++		return 0;
++	}
++
++	rc = regmap_read(chip->regmap, chip->base + BATTERY_CHARGER_STATUS_7,
++			 &stat);
++	if (rc < 0) {
++		dev_err(chip->dev, "Couldn't read charger status 7 rc=%d\n", rc);
++		return rc;
++	}
++
++	if (stat & SMB5_BAT_TEMP_STATUS_TOO_COLD_BIT)
++		*val = POWER_SUPPLY_HEALTH_COLD;
++	else if (stat & SMB5_BAT_TEMP_STATUS_TOO_HOT_BIT)
++		*val = POWER_SUPPLY_HEALTH_OVERHEAT;
++	else if (stat & SMB5_BAT_TEMP_STATUS_COLD_SOFT_BIT)
++		*val = POWER_SUPPLY_HEALTH_COOL;
++	else if (stat & SMB5_BAT_TEMP_STATUS_HOT_SOFT_BIT)
++		*val = POWER_SUPPLY_HEALTH_WARM;
++	else
++		*val = POWER_SUPPLY_HEALTH_GOOD;
++
++	return 0;
++}
++
++static int smb2_get_prop_health(struct smb_chip *chip, int *val)
+ {
+ 	int rc;
+ 	unsigned int stat;
+@@ -644,20 +562,37 @@ static int smb_get_prop_health(struct smb_chip *chip, int *val)
+ 		return rc;
+ 	}
+ 
+-	if (stat & CHARGER_ERROR_STATUS_BAT_OV_BIT)
++	switch (stat) {
++	case SMB2_CHARGER_ERROR_STATUS_BAT_OV_BIT:
+ 		*val = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
+-	else if (stat & BAT_TEMP_STATUS_TOO_COLD_BIT)
++		return 0;
++	case SMB2_BAT_TEMP_STATUS_TOO_COLD_BIT:
+ 		*val = POWER_SUPPLY_HEALTH_COLD;
+-	else if (stat & BAT_TEMP_STATUS_TOO_HOT_BIT)
++		return 0;
++	case SMB2_BAT_TEMP_STATUS_TOO_HOT_BIT:
+ 		*val = POWER_SUPPLY_HEALTH_OVERHEAT;
+-	else if (stat & BAT_TEMP_STATUS_COLD_SOFT_LIMIT_BIT)
++		return 0;
++	case SMB2_BAT_TEMP_STATUS_COLD_SOFT_LIMIT_BIT:
+ 		*val = POWER_SUPPLY_HEALTH_COOL;
+-	else if (stat & BAT_TEMP_STATUS_HOT_SOFT_LIMIT_BIT)
++		return 0;
++	case SMB2_BAT_TEMP_STATUS_HOT_SOFT_LIMIT_BIT:
+ 		*val = POWER_SUPPLY_HEALTH_WARM;
+-	else
++		return 0;
++	default:
+ 		*val = POWER_SUPPLY_HEALTH_GOOD;
++		return 0;
++	}
++}
+ 
+-	return 0;
++static int smb_get_prop_health(struct smb_chip *chip, int *val)
++{
++	switch (chip->gen) {
++	case SMB2:
++		return smb2_get_prop_health(chip, val);
++	case SMB5:
++		return smb5_get_prop_health(chip, val);
++	}
++	return -EINVAL;
+ }
+ 
+ /* writable limits never exceed the battery's own (monitored-battery) maxima */
+@@ -705,6 +640,7 @@ static int smb_get_property(struct power_supply *psy,
+ 			     union power_supply_propval *val)
+ {
+ 	struct smb_chip *chip = power_supply_get_drvdata(psy);
++	int ret;
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_MANUFACTURER:
+@@ -719,8 +655,13 @@ static int smb_get_property(struct power_supply *psy,
+ 		return smb_get_iio_chan(chip, chip->usb_in_i_chan,
+ 					 &val->intval);
+ 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+-		return smb_get_iio_chan(chip, chip->usb_in_v_chan,
++		ret = smb_get_iio_chan(chip, chip->usb_in_v_chan,
+ 					 &val->intval);
++		if (!ret) {
++			if (chip->gen == SMB5)
++				val->intval *= 16;
++		}
++		return ret;
+ 	case POWER_SUPPLY_PROP_ONLINE:
+ 		return smb_get_prop_usb_online(chip, &val->intval);
+ 	case POWER_SUPPLY_PROP_STATUS:
+@@ -778,23 +719,13 @@ static int smb_property_is_writable(struct power_supply *psy,
+ static irqreturn_t smb_handle_batt_overvoltage(int irq, void *data)
+ {
+ 	struct smb_chip *chip = data;
+-	unsigned int status;
+-	int rc;
+-
+-	rc = regmap_read(chip->regmap,
+-			 chip->base + BATTERY_CHARGER_STATUS_2, &status);
+-	if (rc < 0) {
+-		dev_err(chip->dev, "Couldn't read charger status: %d\n", rc);
+-		return IRQ_HANDLED;
+-	}
+ 
+-	if (status & CHARGER_ERROR_STATUS_BAT_OV_BIT) {
++	if (smbx_ov_status(chip) == 1) {
+ 		/* The hardware stops charging automatically */
+ 		dev_err(chip->dev, "battery overvoltage detected\n");
++		power_supply_changed(chip->chg_psy);
+ 	}
+ 
+-	power_supply_changed(chip->chg_psy);
+-
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -826,7 +757,7 @@ static irqreturn_t smb_handle_wdog_bark(int irq, void *data)
+ 
+ 	power_supply_changed(chip->chg_psy);
+ 
+-	rc = regmap_write(chip->regmap, chip->base + BARK_BITE_WDOG_PET,
++	rc = regmap_write(chip->regmap, BARK_BITE_WDOG_PET,
+ 			  BARK_BITE_WDOG_PET_BIT);
+ 	if (rc < 0)
+ 		dev_err(chip->dev, "Couldn't pet the dog rc=%d\n", rc);
+@@ -835,7 +766,7 @@ static irqreturn_t smb_handle_wdog_bark(int irq, void *data)
+ }
+ 
+ static const struct power_supply_desc smb_psy_desc = {
+-	.name = "pmi8998_charger",
++	.name = "SMB2_charger",
+ 	.type = POWER_SUPPLY_TYPE_USB,
+ 	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+@@ -849,16 +780,98 @@ static const struct power_supply_desc smb_psy_desc = {
+ };
+ 
+ /* Init sequence derived from vendor downstream driver */
+-static const struct smb_init_register smb_init_seq[] = {
+-	{ .addr = AICL_RERUN_TIME_CFG, .mask = AICL_RERUN_TIME_MASK, .val = 0 },
++static const struct smb_init_register smb5_init_seq[] = {
++	{ .addr = USBIN_CMD_IL, .mask = USBIN_SUSPEND_BIT, .val = 0 },
++	/*
++	 * By default configure us as an upstream facing port
++	 * FIXME: This will be handled by the type-c driver
++	 */
++	{ .addr = SMB5_TYPE_C_MODE_CFG,
++	  .mask = SMB5_EN_TRY_SNK_BIT | SMB5_EN_SNK_ONLY_BIT,
++	  .val = SMB5_EN_TRY_SNK_BIT },
++	{ .addr = SMB5_TYPEC_TYPE_C_VCONN_CONTROL,
++	  .mask = SMB5_VCONN_EN_ORIENTATION_BIT | SMB5_VCONN_EN_SRC_BIT |
++		  SMB5_VCONN_EN_VALUE_BIT,
++	  .val = SMB2_VCONN_EN_SRC_BIT },
++	{ .addr = SMB5_DEBUG_ACCESS_SRC_CFG,
++	  .mask = SMB5_EN_UNORIENTED_DEBUG_ACCESS_SRC_BIT,
++	  .val = SMB5_EN_UNORIENTED_DEBUG_ACCESS_SRC_BIT },
++	{ .addr = SMB5_TYPE_C_EXIT_STATE_CFG,
++	  .mask = SMB5_SEL_SRC_UPPER_REF_BIT,
++	  .val = SMB5_SEL_SRC_UPPER_REF_BIT },
++	/*
++	 * Disable Type-C factory mode and stay in Attached.SRC state when VCONN
++	 * over-current happens
++	 */
++	{ .addr = TYPE_C_CFG,
++	  .mask = APSD_START_ON_CC_BIT,
++	  .val = 0 },
++	{ .addr = SMB5_TYPE_C_DEBUG_ACCESS_SINK,
++	  .mask = SMB5_TYPEC_DEBUG_ACCESS_SINK_MASK,
++	  .val = 0x17 },
++	/* Configure VBUS for software control */
++	{ .addr = OTG_CFG, .mask = OTG_EN_SRC_CFG_BIT, .val = 0 },
++	/*
++	 * Recharge when State Of Charge drops below 98%.
++	 */
++	{ .addr = SMB5_CHARGE_RCHG_SOC_THRESHOLD_CFG_REG,
++	  .mask = SMB5_CHARGE_RCHG_SOC_THRESHOLD_CFG_MASK,
++	  .val = 250 },
++	/* Enable charging */
++	{ .addr = CHARGING_ENABLE_CMD,
++	  .mask = CHARGING_ENABLE_CMD_BIT,
++	  .val = CHARGING_ENABLE_CMD_BIT },
++	/* Enable BC1P2 auto Src detect */
++	{ .addr = USBIN_OPTIONS_1_CFG,
++	  .mask = AUTO_SRC_DETECT_BIT,
++	  .val = AUTO_SRC_DETECT_BIT },
++	/* Set the default SDP charger type to a 500ma USB 2.0 port */
++	{ .addr = USBIN_ICL_OPTIONS,
++	  .mask = USBIN_MODE_CHG_BIT,
++	  .val = USBIN_MODE_CHG_BIT },
++	{ .addr = CMD_ICL_OVERRIDE,
++	  .mask = ICL_OVERRIDE_BIT,
++	  .val = 0 },
++	{ .addr = USBIN_LOAD_CFG,
++	  .mask = ICL_OVERRIDE_AFTER_APSD_BIT,
++	  .val = 0 },
++	/* Disable watchdog */
++	{ .addr = SNARL_BARK_BITE_WD_CFG, .mask = 0xff, .val = 0 },
++	{ .addr = WD_CFG,
++	  .mask = WATCHDOG_TRIGGER_AFP_EN_BIT | WDOG_TIMER_EN_ON_PLUGIN_BIT |
++		  BARK_WDOG_INT_EN_BIT,
++	  .val = 0 },
++	/*
++	 * Enable Automatic Input Current Limit, this will slowly ramp up the current
++	 * When connected to a wall charger, and automatically stop when it detects
++	 * the charger current limit (voltage drop?) or it reaches the programmed limit.
++	 */
++	{ .addr = USBIN_AICL_OPTIONS_CFG,
++	  .mask = USBIN_AICL_PERIODIC_RERUN_EN_BIT | USBIN_AICL_ADC_EN_BIT
++			| USBIN_AICL_EN_BIT | SUSPEND_ON_COLLAPSE_USBIN_BIT,
++	  .val = USBIN_AICL_PERIODIC_RERUN_EN_BIT | USBIN_AICL_ADC_EN_BIT
++			| USBIN_AICL_EN_BIT | SUSPEND_ON_COLLAPSE_USBIN_BIT },
++	/*
++	 * This overrides all of the other current limit configs and is
++	 * expected to be used for setting limits based on temperature.
++	 * We set some relatively safe default value while still allowing
++	 * a comfortably fast charging rate.
++	 */
++	{ .addr = FAST_CHARGE_CURRENT_CFG,
++	  .mask = FAST_CHARGE_CURRENT_SETTING_MASK,
++	  .val = 1950000 / CURRENT_SCALE_FACTOR },
++};
++
++/* Init sequence derived from vendor downstream driver */
++static const struct smb_init_register smb2_init_seq[] = {
+ 	/*
+ 	 * By default configure us as an upstream facing port
+ 	 * FIXME: This will be handled by the type-c driver
+ 	 */
+ 	{ .addr = TYPE_C_INTRPT_ENB_SOFTWARE_CTRL,
+-	  .mask = TYPEC_POWER_ROLE_CMD_MASK | VCONN_EN_SRC_BIT |
++	  .mask = TYPEC_POWER_ROLE_CMD_MASK | SMB2_VCONN_EN_SRC_BIT |
+ 		  VCONN_EN_VALUE_BIT,
+-	  .val = VCONN_EN_SRC_BIT },
++	  .val = SMB2_VCONN_EN_SRC_BIT },
+ 	/*
+ 	 * Disable Type-C factory mode and stay in Attached.SRC state when VCONN
+ 	 * over-current happens
+@@ -872,11 +885,15 @@ static const struct smb_init_register smb_init_seq[] = {
+ 	 * Use VBAT to determine the recharge threshold when battery is full
+ 	 * rather than the state of charge.
+ 	 */
+-	{ .addr = FG_UPDATE_CFG_2_SEL,
+-	  .mask = SOC_LT_CHG_RECHARGE_THRESH_SEL_BIT |
+-		  VBT_LT_CHG_RECHARGE_THRESH_SEL_BIT,
+-	  .val = VBT_LT_CHG_RECHARGE_THRESH_SEL_BIT },
++	{ .addr = SMB2_FG_UPDATE_CFG_2_SEL,
++	  .mask = SMB2_SOC_LT_CHG_RECHARGE_THRESH_SEL_BIT |
++		  SMB2_VBT_LT_CHG_RECHARGE_THRESH_SEL_BIT,
++	  .val = SMB2_VBT_LT_CHG_RECHARGE_THRESH_SEL_BIT },
++	/* Enable charging */
+ 	{ .addr = USBIN_OPTIONS_1_CFG, .mask = HVDCP_EN_BIT, .val = 0 },
++	{ .addr = CHARGING_ENABLE_CMD,
++	  .mask = CHARGING_ENABLE_CMD_BIT,
++	  .val = CHARGING_ENABLE_CMD_BIT },
+ 	/*
+ 	 * Match downstream defaults
+ 	 * CHG_EN_SRC_BIT - charger enable is controlled by software
+@@ -897,13 +914,6 @@ static const struct smb_init_register smb_init_seq[] = {
+ 		  AUTO_RECHG_BIT | EN_ANALOG_DROP_IN_VBATT_BIT |
+ 		  CHARGER_INHIBIT_BIT,
+ 	  .val = CHARGER_INHIBIT_BIT },
+-	/*
+-	 * Set the enable command only once CHGR_CFG2 has selected software
+-	 * control, or a charger its watchdog has disabled stays disabled.
+-	 */
+-	{ .addr = CHARGING_ENABLE_CMD,
+-	  .mask = CHARGING_ENABLE_CMD_BIT,
+-	  .val = CHARGING_ENABLE_CMD_BIT },
+ 	/* STAT pin software override, match downstream. Parallel charging? */
+ 	{ .addr = STAT_CFG,
+ 	  .mask = STAT_SW_OVERRIDE_CFG_BIT,
+@@ -946,17 +956,46 @@ static const struct smb_init_register smb_init_seq[] = {
+ 	  .val = 500000 / CURRENT_SCALE_FACTOR },
+ };
+ 
+-static int smb_init_hw(struct smb_chip *chip)
++struct smb_match_data pmi8998_match_data = {
++	.init_seq = smb2_init_seq,
++	.init_seq_len = ARRAY_SIZE(smb2_init_seq),
++	.name = "pmi8998",
++	.gen = SMB2,
++};
++
++struct smb_match_data pm660_match_data = {
++	.init_seq = smb2_init_seq,
++	.init_seq_len = ARRAY_SIZE(smb2_init_seq),
++	.name = "pm660",
++	.gen = SMB2,
++};
++
++struct smb_match_data pm8150b_match_data = {
++	.init_seq = smb5_init_seq,
++	.init_seq_len = ARRAY_SIZE(smb5_init_seq),
++	.name = "pm8150b",
++	.gen = SMB5,
++};
++
++struct smb_match_data pm7250b_match_data = {
++	.init_seq = smb5_init_seq,
++	.init_seq_len = ARRAY_SIZE(smb5_init_seq),
++	.name = "pm7250b",
++	.gen = SMB5,
++};
++
++
++static int smb_init_hw(struct smb_chip *chip, const struct smb_init_register *init_seq, size_t len)
+ {
+ 	int rc, i;
+ 
+-	for (i = 0; i < ARRAY_SIZE(smb_init_seq); i++) {
++	for (i = 0; i < len; i++) {
+ 		dev_dbg(chip->dev, "%d: Writing 0x%02x to 0x%02x\n", i,
+-			smb_init_seq[i].val, smb_init_seq[i].addr);
++			init_seq[i].val, init_seq[i].addr);
+ 		rc = regmap_update_bits(chip->regmap,
+-					chip->base + smb_init_seq[i].addr,
+-					smb_init_seq[i].mask,
+-					smb_init_seq[i].val);
++					chip->base + init_seq[i].addr,
++					init_seq[i].mask,
++					init_seq[i].val);
+ 		if (rc < 0)
+ 			return dev_err_probe(chip->dev, rc,
+ 					     "%s: init command %d failed\n",
+@@ -966,19 +1005,6 @@ static int smb_init_hw(struct smb_chip *chip)
+ 	return 0;
+ }
+ 
+-static void smb_restore_charge_enable(void *data)
+-{
+-	struct smb_chip *chip = data;
+-	int rc;
+-
+-	rc = regmap_update_bits(chip->regmap,
+-				chip->base + CHARGING_ENABLE_CMD,
+-				CHARGING_ENABLE_CMD_BIT,
+-				chip->initial_charge_enable);
+-	if (rc < 0)
+-		dev_err(chip->dev, "Couldn't restore charging state: %d\n", rc);
+-}
+-
+ static int smb_init_irq(struct smb_chip *chip, int *irq, const char *name,
+ 			 irqreturn_t (*handler)(int irq, void *data))
+ {
+@@ -992,7 +1018,8 @@ static int smb_init_irq(struct smb_chip *chip, int *irq, const char *name,
+ 	rc = devm_request_threaded_irq(chip->dev, irqnum, NULL, handler,
+ 				       IRQF_ONESHOT, name, chip);
+ 	if (rc < 0)
+-		return rc;
++		return dev_err_probe(chip->dev, rc, "Couldn't request irq %s\n",
++				     name);
+ 
+ 	if (irq)
+ 		*irq = irqnum;
+@@ -1008,9 +1035,7 @@ static int smb_probe(struct platform_device *pdev)
+ 	struct power_supply_config supply_config = {};
+ 	struct power_supply_desc *desc;
+ 	struct smb_chip *chip;
+-	unsigned int charge_enable;
+-	unsigned int float_voltage_sel;
+-	int float_voltage_uv;
++	const struct smb_match_data *match_data;
+ 	int rc, irq;
+ 
+ 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
+@@ -1041,19 +1066,13 @@ static int smb_probe(struct platform_device *pdev)
+ 				     "Couldn't get usbin_i IIO channel\n");
+ 	}
+ 
+-	rc = regmap_read(chip->regmap, chip->base + CHARGING_ENABLE_CMD,
+-			 &charge_enable);
+-	if (rc < 0)
+-		return dev_err_probe(chip->dev, rc,
+-				     "Couldn't read charging state\n");
++	match_data = (const struct smb_match_data *)device_get_match_data(chip->dev);
+ 
+-	chip->initial_charge_enable = charge_enable & CHARGING_ENABLE_CMD_BIT;
+-	rc = devm_add_action_or_reset(chip->dev, smb_restore_charge_enable, chip);
+-	if (rc)
+-		return dev_err_probe(chip->dev, rc,
+-				     "Couldn't register charging state rollback\n");
++	chip->gen = match_data->gen;
+ 
+-	rc = smb_init_hw(chip);
++	dev_info(chip->dev, "Generation %s\n", chip->gen == SMB2 ? "SMB2" : "SMB5");
++
++	rc = smb_init_hw(chip, match_data->init_seq, match_data->init_seq_len);
+ 	if (rc < 0)
+ 		return rc;
+ 
+@@ -1066,7 +1085,7 @@ static int smb_probe(struct platform_device *pdev)
+ 	memcpy(desc, &smb_psy_desc, sizeof(smb_psy_desc));
+ 	desc->name =
+ 		devm_kasprintf(chip->dev, GFP_KERNEL, "%s-charger",
+-			       (const char *)device_get_match_data(chip->dev));
++			       match_data->name);
+ 	if (!desc->name)
+ 		return -ENOMEM;
+ 
+@@ -1100,35 +1119,12 @@ static int smb_probe(struct platform_device *pdev)
+ 		return dev_err_probe(chip->dev, rc,
+ 				     "Failed to init status change work\n");
+ 
+-	if (power_supply_battery_info_has_prop(chip->batt_info,
+-					       POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX)) {
+-		float_voltage_uv =
+-			chip->batt_info->constant_charge_voltage_max_uv;
+-	} else if (power_supply_battery_info_has_prop(chip->batt_info,
+-					      POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN)) {
+-		float_voltage_uv = chip->batt_info->voltage_max_design_uv;
+-	} else {
+-		dev_warn(chip->dev, "No battery float voltage; preserving hardware setting\n");
+-		goto skip_float_voltage;
+-	}
+-
+-	if (float_voltage_uv < SMB2_FLOAT_VOLTAGE_MIN_UV ||
+-	    float_voltage_uv > SMB2_FLOAT_VOLTAGE_MAX_UV)
+-		return dev_err_probe(chip->dev, -EINVAL,
+-				     "float voltage %d uV outside %d-%d uV\n",
+-				     float_voltage_uv,
+-				     SMB2_FLOAT_VOLTAGE_MIN_UV,
+-				     SMB2_FLOAT_VOLTAGE_MAX_UV);
+-
+-	float_voltage_sel =
+-		(float_voltage_uv - SMB2_FLOAT_VOLTAGE_MIN_UV) /
+-		SMB2_FLOAT_VOLTAGE_STEP_UV;
++	rc = (chip->batt_info->voltage_max_design_uv - 3487500) / 7500 + 1;
+ 	rc = regmap_update_bits(chip->regmap, chip->base + FLOAT_VOLTAGE_CFG,
+-				FLOAT_VOLTAGE_SETTING_MASK, float_voltage_sel);
++				FLOAT_VOLTAGE_SETTING_MASK, rc);
+ 	if (rc < 0)
+ 		return dev_err_probe(chip->dev, rc, "Couldn't set vbat max\n");
+ 
+-skip_float_voltage:
+ 	rc = smb_init_irq(chip, &irq, "bat-ov", smb_handle_batt_overvoltage);
+ 	if (rc < 0)
+ 		return rc;
+@@ -1152,8 +1148,6 @@ static int smb_probe(struct platform_device *pdev)
+ 	if (rc < 0)
+ 		return dev_err_probe(chip->dev, rc, "Couldn't set wake irq\n");
+ 
+-	devm_remove_action(chip->dev, smb_restore_charge_enable, chip);
+-
+ 	platform_set_drvdata(pdev, chip);
+ 
+ 	/*
+@@ -1183,8 +1177,10 @@ static int smb_probe(struct platform_device *pdev)
+ }
+ 
+ static const struct of_device_id smb_match_id_table[] = {
+-	{ .compatible = "qcom,pmi8998-charger", .data = "pmi8998" },
+-	{ .compatible = "qcom,pm660-charger", .data = "pm660" },
++	{ .compatible = "qcom,pmi8998-charger", .data = &pmi8998_match_data },
++	{ .compatible = "qcom,pm660-charger", .data = &pm660_match_data },
++	{ .compatible = "qcom,pm7250b-charger", .data = &pm7250b_match_data },
++	{ .compatible = "qcom,pm8150b-charger", .data = &pm8150b_match_data },
+ 	{ /* sentinal */ }
+ };
+ MODULE_DEVICE_TABLE(of, smb_match_id_table);
+diff --git a/sound/soc/codecs/wcd934x.c b/sound/soc/codecs/wcd934x.c
+index caca5cc25..b3f06bc51 100644
+--- a/sound/soc/codecs/wcd934x.c
++++ b/sound/soc/codecs/wcd934x.c
+@@ -549,6 +549,7 @@ struct wcd934x_codec {
+ 	/* mbhc module */
+ 	struct wcd_mbhc *mbhc;
+ 	struct wcd_mbhc_config mbhc_cfg;
++	bool no_headset_jack;
+ 	struct wcd_mbhc_intr intr_ids;
+ 	bool mbhc_started;
+ 	struct mutex micb_lock;
+@@ -3007,6 +3008,10 @@ static int wcd934x_comp_probe(struct snd_soc_component *component)
+ 		return ret;
+ 	}
+ 
++	/* boards without a headset jack: no headset detection (it reports a phantom headset on floating pins) */
++	if (wcd->no_headset_jack)
++		return 0;
++
+ 	if (wcd934x_mbhc_init(component))
+ 		dev_err(component->dev, "Failed to Initialize MBHC\n");
+ 
+@@ -5817,6 +5822,8 @@ static int wcd934x_codec_parse_data(struct wcd934x_codec *wcd)
+ 
+ 	of_property_read_u32(dev->parent->of_node, "qcom,dmic-sample-rate",
+ 			     &wcd->dmic_sample_rate);
++	/* dev is the SLIMbus device: its own node is the codec node (dev->parent = the SLIMbus controller) */
++	wcd->no_headset_jack = of_property_read_bool(dev->of_node, "qcom,no-headset-jack");
+ 
+ 	cfg->mbhc_micbias = MIC_BIAS_2;
+ 	cfg->anc_micbias = MIC_BIAS_2;
+@@ -5827,7 +5834,8 @@ static int wcd934x_codec_parse_data(struct wcd934x_codec *wcd)
+ 	cfg->hs_thr = 1700;
+ 	cfg->hph_thr = 50;
+ 
+-	wcd_dt_parse_mbhc_data(dev, cfg);
++	if (!wcd->no_headset_jack)
++		wcd_dt_parse_mbhc_data(dev, cfg);
+ 
+ 	return 0;
+ }
+diff --git a/sound/soc/qcom/qdsp6/q6asm-dai.c b/sound/soc/qcom/qdsp6/q6asm-dai.c
+index 74d316f65..cc16e8636 100644
+--- a/sound/soc/qcom/qdsp6/q6asm-dai.c
++++ b/sound/soc/qcom/qdsp6/q6asm-dai.c
+@@ -222,9 +222,11 @@ static int q6asm_dai_prepare(struct snd_soc_component *component,
+ 	}
+ 
+ 	prtd->pcm_count = snd_pcm_lib_period_bytes(substream);
+-	/* rate and channels are sent to audio driver */
+-	if (prtd->state == Q6ASM_STREAM_RUNNING) {
+-		/* clear the previous setup if any  */
++	/*
++	 * Clear the previous setup if any: the stream is open on the DSP in RUNNING and also after a STOP trigger
++	 * (STOPPED - only an EOS was sent). Re-opening it without the close fails with ADSP_EALREADY.
++	 */
++	if (prtd->state != Q6ASM_STREAM_IDLE) {
+ 		ret = q6asm_cmd(prtd->audio_client, prtd->stream_id, CMD_CLOSE);
+ 		if (ret < 0) {
+ 			dev_err(dev, "Failed to close q6asm stream %d\n", prtd->stream_id);
+@@ -237,10 +239,9 @@ static int q6asm_dai_prepare(struct snd_soc_component *component,
+ 				prtd->stream_id);
+ 			return ret;
+ 		}
+-
+ 		q6routing_stream_close(soc_prtd->dai_link->id,
+ 					 substream->stream);
+-		prtd->state = Q6ASM_STREAM_STOPPED;
++		prtd->state = Q6ASM_STREAM_IDLE;
+ 	}
+ 
+ 	ret = q6asm_map_memory_regions(substream->stream, prtd->audio_client,
+@@ -316,6 +317,7 @@ static int q6asm_dai_prepare(struct snd_soc_component *component,
+ 	q6asm_cmd(prtd->audio_client, prtd->stream_id,  CMD_CLOSE);
+ open_err:
+ 	q6asm_unmap_memory_regions(substream->stream, prtd->audio_client);
++	prtd->state = Q6ASM_STREAM_IDLE;
+ 
+ 	return ret;
+ }
+-- 
+2.43.0
+

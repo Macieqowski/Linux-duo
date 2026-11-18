@@ -1,0 +1,72 @@
+# Builds everything the Surface Duo 1 needs, as downloadable artifacts:
+#   kernel-and-boot: duo-debian.img (fastboot boot), duo-modules-*.tar.zst, Image.gz, dtb, config
+#   rootfs:          duo-debian-rootfs.tar.zst (Debian 13 + KDE Plasma Mobile, arm64)
+# The two jobs run in parallel. Start it by hand (Actions -> build -> Run workflow) or by pushing a tag v*.
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      rootfs:
+        description: "Also build the Debian root file system (takes 1-2 h under emulation)"
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
+
+jobs:
+  kernel-and-boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc-aarch64-linux-gnu device-tree-compiler flex bison bc libssl-dev libelf-dev \
+            cpio zstd xz-utils python3 kmod curl git
+      - name: Kernel, modules and boot image
+        run: sudo scripts/build-kernel-and-boot.sh "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: duo-kernel-and-boot
+          path: out/
+          if-no-files-found: error
+
+  rootfs:
+    if: github.event_name == 'push' || inputs.rootfs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Build tools (debootstrap + arm64 emulation)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q debootstrap qemu-user-static binfmt-support zstd make
+          # Ubuntu's keyring predates trixie: take Debian's archive keys 12 + 13 for debootstrap
+          for k in 12 13; do curl -fsSL https://ftp-master.debian.org/keys/archive-key-$k.asc; done | gpg --dearmor > debian-trixie.gpg
+      - name: Debian 13 + Plasma Mobile
+        run: sudo KEYRING="$GITHUB_WORKSPACE/debian-trixie.gpg" rootfs/build-debian-rootfs.sh "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/out/duo-debian-rootfs.tar.zst"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: duo-debian-rootfs
+          path: out/duo-debian-rootfs.tar.zst
+          compression-level: 0
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push'
+    needs: [kernel-and-boot, rootfs]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: dl/*/*
