@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Surface Duo posture (Debian/Plasma, 2026-11-19): follow the hinge like Android does.
 #   closed (hinge < 10 deg)          -> both panels off, touch off
-#   folded back (hinge > 330 deg)    -> one screen: DSI-1 (the screen without the camera) stays, DSI-2 + its touch off
+#   folded back (hinge > 330 deg)    -> one screen: DSI-2 (the camera side) stays, DSI-1 + its touch off (as Android)
 #   anything else                    -> both screens
 # Runs in the Plasma session (autostart org.duo.Posture.desktop): kscreen-doctor and KWin's input devices need the
 # user's Wayland/D-Bus session. The hinge angle comes from the sensor DSP (duo-hinge, libssc). Hysteresis: 10/20 and
@@ -27,10 +27,11 @@ LEFT='Touchscreen 045E:0C02'    # DSI-1
 apply() {
 	case $1 in
 	closed) kscreen-doctor --dpms off > /dev/null 2>&1; touch_set "$RIGHT" false; touch_set "$LEFT" false ;;
-	single) kscreen-doctor --dpms on > /dev/null 2>&1; kscreen-doctor output.DSI-2.disable > /dev/null 2>&1
-		touch_set "$RIGHT" false; touch_set "$LEFT" true ;;
+	single) kscreen-doctor --dpms on > /dev/null 2>&1
+		kscreen-doctor output.DSI-2.enable output.DSI-1.disable > /dev/null 2>&1
+		touch_set "$LEFT" false; touch_set "$RIGHT" true ;;
 	dual)   kscreen-doctor --dpms on > /dev/null 2>&1
-		kscreen-doctor output.DSI-2.enable output.DSI-2.position.563,0 > /dev/null 2>&1
+		kscreen-doctor output.DSI-1.enable output.DSI-2.enable output.DSI-1.position.0,0 output.DSI-2.position.563,0 > /dev/null 2>&1
 		touch_set "$RIGHT" true; touch_set "$LEFT" true ;;
 	esac
 	log "posture $1 (hinge $2 deg)"
