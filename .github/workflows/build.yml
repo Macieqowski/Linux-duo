@@ -11,11 +11,16 @@ on:
         description: "Also build the Debian root file system (takes 1-2 h under emulation)"
         type: boolean
         default: true
+      kernel:
+        description: "Build the kernel, modules and boot image (about 1.5 h)"
+        type: boolean
+        default: true
   push:
     tags: ["v*"]
 
 jobs:
   kernel-and-boot:
+    if: github.event_name == 'push' || inputs.kernel
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:

@@ -7,7 +7,7 @@ export DEBIAN_FRONTEND=noninteractive
 V=${IPTSD_VERSION:-v3.1.1}
 apt-get -q -y --no-install-recommends install build-essential curl ca-certificates meson ninja-build pkg-config cmake \
   libinih-dev libfmt-dev libspdlog-dev libeigen3-dev libcli11-dev libsdl2-dev libcairomm-1.0-dev libhidapi-dev \
-  libmicrosoft-gsl-dev > /dev/null
+  libmsgsl-dev > /dev/null
 T=/var/tmp/iptsd; rm -rf $T; mkdir -p $T; cd $T
 curl -fsSL https://github.com/linux-surface/iptsd/archive/refs/tags/$V.tar.gz | tar -xz
 cd iptsd-*
