@@ -1,8 +1,0 @@
-[Desktop Entry]
-# SPDX-License-Identifier: GPL-2.0-or-later
-# Surface Duo (Debian/Plasma): screens follow the hinge (closed = off, folded back = one screen). See duo-posture.
-Type=Application
-Name=Duo posture
-Exec=/usr/libexec/duo/duo-posture
-NoDisplay=true
-X-KDE-autostart-phase=2

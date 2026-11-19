@@ -1,38 +1,44 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Surface Duo posture (Debian/Plasma, 2026-11-19): follow the hinge like Android does.
-#   closed (hinge < 10 deg)          -> both panels off, touch off
-#   folded back (hinge > 330 deg)    -> one screen: DSI-2 (the camera side) stays, DSI-1 + its touch off
+# Surface Duo posture (Debian/Plasma, 2026-11-19): the screens follow the hinge.
+#   closed (hinge < 10 deg)          -> both panels dark, touch off
+#   folded back (hinge > 330 deg)    -> DSI-2 (camera side) stays, DSI-1 dark + its touch off
 #   anything else                    -> both screens
-# Runs in the Plasma session (autostart org.duo.Posture.desktop): kscreen-doctor and KWin's input devices need the
-# user's Wayland/D-Bus session. The hinge angle comes from the sensor DSP (duo-hinge, libssc). Hysteresis: 10/20 and
-# 330/310 deg. Log: $XDG_RUNTIME_DIR/duo-posture.log. Off: touch ~/.config/duo-posture-off
+# Panels go dark through the backlight (bl_power), NOT by disabling the output or DPMS: switching a DSI output off and
+# on at runtime (kscreen-doctor output.X.disable / --dpms) left the command-mode panels' DPU pipeline stuck - a
+# commit timeout every ~90 ms, the whole UI at ~10 fps (2026-11-19). The outputs stay as they are for KWin.
+# Touch: KWin's input devices of the session user (D-Bus). Runs as root (duo-posture.service; the backlights are
+# root's). The hinge angle: duo-hinge (libssc). Hysteresis 10/20 and 330/310 deg. Off: touch /etc/duo/posture-off
 H=/usr/libexec/duo/duo-hinge
-LOG=${XDG_RUNTIME_DIR:-/tmp}/duo-posture.log
+LOG=/run/duo-posture.log
 log() { echo "$(date +%T) $*" >> "$LOG"; }
-[ -f "$HOME/.config/duo-posture-off" ] && { log "off (~/.config/duo-posture-off)"; exit 0; }
+[ -f /etc/duo/posture-off ] && { log "off (/etc/duo/posture-off)"; exit 0; }
+BL1=/sys/class/backlight/ae94000.dsi.0   # DSI-1
+BL2=/sys/class/backlight/ae96000.dsi.0   # DSI-2 (camera side)
+LEFT='Touchscreen 045E:0C02'             # DSI-1
+RIGHT='Touchscreen 045E:0C01'            # DSI-2
 
-# KWin input device (D-Bus object path) by name; enabled true|false
-touch_dev() {
-	for p in $(busctl --user --list tree org.kde.KWin 2>/dev/null | grep '/org/kde/KWin/InputDevice/'); do
-		busctl --user get-property org.kde.KWin "$p" org.kde.KWin.InputDevice name 2>/dev/null | grep -q "$1" && echo "$p"
+# the graphical session's user (auto-login: user)
+sess() {
+	U=$(loginctl list-sessions --no-legend 2>/dev/null | awk '$3 != "root" && $3 != "" {print $3; exit}'); U=${U:-user}
+	UID_=$(id -u "$U" 2>/dev/null) || return 1
+	[ -S /run/user/$UID_/bus ] || return 1
+}
+ubus() { runuser -u "$U" -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_/bus busctl --user "$@"; }
+touch_set() { # <name pattern> <true|false>
+	sess || return 0
+	for p in $(ubus --list tree org.kde.KWin 2>/dev/null | grep '/org/kde/KWin/InputDevice/'); do
+		ubus get-property org.kde.KWin "$p" org.kde.KWin.InputDevice name 2>/dev/null | grep -q "$1" &&
+			ubus set-property org.kde.KWin "$p" org.kde.KWin.InputDevice enabled b "$2"
 	done
 }
-touch_set() { # <name pattern> <true|false>
-	for p in $(touch_dev "$1"); do busctl --user set-property org.kde.KWin "$p" org.kde.KWin.InputDevice enabled b "$2"; done
-}
-RIGHT='Touchscreen 045E:0C01'   # DSI-2 (camera side)
-LEFT='Touchscreen 045E:0C02'    # DSI-1
+panel() { [ -w "$1/bl_power" ] && echo "$2" > "$1/bl_power"; }   # 0 = on, 4 = off
 
 apply() {
 	case $1 in
-	closed) kscreen-doctor --dpms off > /dev/null 2>&1; touch_set "$RIGHT" false; touch_set "$LEFT" false ;;
-	single) kscreen-doctor --dpms on > /dev/null 2>&1
-		kscreen-doctor output.DSI-2.enable output.DSI-1.disable > /dev/null 2>&1
-		touch_set "$LEFT" false; touch_set "$RIGHT" true ;;
-	dual)   kscreen-doctor --dpms on > /dev/null 2>&1
-		kscreen-doctor output.DSI-1.enable output.DSI-2.enable output.DSI-1.position.0,0 output.DSI-2.position.563,0 > /dev/null 2>&1
-		touch_set "$RIGHT" true; touch_set "$LEFT" true ;;
+	closed) panel $BL1 4; panel $BL2 4; touch_set "$LEFT" false; touch_set "$RIGHT" false ;;
+	single) panel $BL2 0; panel $BL1 4; touch_set "$RIGHT" true; touch_set "$LEFT" false ;;
+	dual)   panel $BL1 0; panel $BL2 0; touch_set "$LEFT" true; touch_set "$RIGHT" true ;;
 	esac
 	log "posture $1 (hinge $2 deg)"
 }

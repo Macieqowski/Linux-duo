@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo: screens follow the hinge (closed = dark, folded back = camera-side screen only). Off: /etc/duo/posture-off
+[Unit]
+Description=Surface Duo posture (hinge -> screens)
+After=duo-sensors.service display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/duo/duo-posture
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
