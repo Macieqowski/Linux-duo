@@ -154,6 +154,31 @@ static void show_qsr(const uint8_t *p, size_t n, double now)
 	printf("\n");
 }
 
+// The router keeps the masks and pushes them to each peripheral when its control channel comes up; they are sent
+// again at 15 s and 30 s anyway, in case the modem (started after us) dropped masks that arrived before its feature
+// mask exchange.
+static void set_masks(int fd, uint32_t msgmask, const char *logs)
+{
+	if (msgmask) {
+		uint8_t m[7] = { 0x7d, 0x05, 0, msgmask, msgmask >> 8, msgmask >> 16, msgmask >> 24 };
+		sendpkt(fd, m, sizeof(m), "msg mask");
+	}
+	uint8_t ev[2] = { 0x60, 0x01 };
+	sendpkt(fd, ev, sizeof(ev), "event enable");
+	if (!logs)
+		return;
+	char *copy = strdup(logs), *save = NULL;
+	for (char *s = strtok_r(copy, ",", &save); s; s = strtok_r(NULL, ",", &save)) {
+		uint32_t eq = strtoul(s, NULL, 0), items = 4096; // router caps num_items to the equip's range
+		uint8_t pkt[16 + 512] = { 0x73, 0, 0, 0, 3, 0, 0, 0 };
+		memcpy(pkt + 8, &eq, 4);
+		memcpy(pkt + 12, &items, 4);
+		memset(pkt + 16, 0xff, 512);
+		sendpkt(fd, pkt, sizeof(pkt), "log mask");
+	}
+	free(copy);
+}
+
 int main(int argc, char **argv)
 {
 	uint32_t msgmask = 0x1f;
@@ -200,21 +225,9 @@ usage:
 	sigaction(SIGINT, &sig, NULL);
 	sigaction(SIGTERM, &sig, NULL);
 
-	if (msgmask) {
-		uint8_t m[7] = { 0x7d, 0x05, 0, msgmask, msgmask >> 8, msgmask >> 16, msgmask >> 24 };
-		sendpkt(fd, m, sizeof(m), "msg mask");
-	}
-	uint8_t ev[2] = { 0x60, 0x01 };
-	sendpkt(fd, ev, sizeof(ev), "event enable");
-	for (char *s = logs ? strtok(logs, ",") : NULL; s; s = strtok(NULL, ",")) {
-		uint32_t eq = strtoul(s, NULL, 0), items = 4096; // router caps num_items to the equip's range
-		uint8_t pkt[16 + 512] = { 0x73, 0, 0, 0, 3, 0, 0, 0 };
-		memcpy(pkt + 8, &eq, 4);
-		memcpy(pkt + 12, &items, 4);
-		memset(pkt + 16, 0xff, 512);
-		sendpkt(fd, pkt, sizeof(pkt), "log mask");
-	}
+	set_masks(fd, msgmask, logs);
 	double t0 = mono(), last = t0;
+	int resent = 0;
 	printf("duo-diag-cap: connected, msg mask 0x%x, events on, logs %s -> %s\n", msgmask, logs ? "set" : "off",
 	       argv[optind]);
 	while (!stop && (!limit || mono() - t0 < limit)) {
@@ -222,6 +235,11 @@ usage:
 		if (poll(&pf, 1, 1000) < 0 && errno != EINTR)
 			break;
 		double now = mono();
+		if ((resent == 0 && now - t0 >= 15) || (resent == 1 && now - t0 >= 30)) {
+			set_masks(fd, msgmask, logs);
+			resent++;
+			fprintf(stderr, "duo-diag-cap: %.0f s: masks sent again\n", now - t0);
+		}
 		if (now - last >= 10) {
 			fflush(out);
 			fprintf(stderr, "duo-diag-cap: %.0f s: %lu pkts %lu B (f3 %lu qsr %lu evt %lu log %lu other %lu)\n",
