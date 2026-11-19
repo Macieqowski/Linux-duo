@@ -9,7 +9,7 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive LANG=C.
 apt-get -q update
 
 # the Duo's hardware userspace (must all install)
-apt-get -q -y --no-install-recommends install sddm hexagonrpcd iio-sensor-proxy modemmanager rmtfs tqftpserv \
+apt-get -q -y --no-install-recommends install sddm hexagonrpcd iio-sensor-proxy modemmanager iputils-ping rmtfs tqftpserv \
   protection-domain-mapper qrtr-tools umtp-responder avahi-daemon alsa-ucm-conf alsa-utils python3-dbus python3-gi \
   netcat-openbsd psmisc libqmi-utils iproute2 qbootctl gdisk accountsservice \
   wpasupplicant bluez systemd-timesyncd systemd-coredump nftables \
@@ -65,10 +65,11 @@ grep -q '^\[InitialStart\]' $MRC || printf '\n[InitialStart]\nwizardRun=true\n' 
 
 # mobile radio OFF by default (= nmcli radio wwan off): with a SIM, ModemManager enables the radio and ~2 s later the
 # modem dies on the RF QLink assertion (rflm_qlnk_ls_retry_cnt), taking Wi-Fi (firmware on the modem DSP) with it
-# (linuxduobench 2026-11-08; again 2026-11-19 with a Play SIM). The SIM stays visible; calls/data need that fixed first.
+# (linuxduobench 2026-11-08; again 2026-11-19 with a Play SIM). Fixed 2026-11-19: duo-modem(-lowpower) set LTE only
+# before ModemManager -> registration + data work, so the mobile radio is on by default again.
 mkdir -p /var/lib/NetworkManager
 grep -q '^WWANEnabled' /var/lib/NetworkManager/NetworkManager.state 2>/dev/null ||
-  printf '[main]\nNetworkingEnabled=true\nWirelessEnabled=true\nWWANEnabled=false\n' > /var/lib/NetworkManager/NetworkManager.state
+  printf '[main]\nNetworkingEnabled=true\nWirelessEnabled=true\nWWANEnabled=true\n' > /var/lib/NetworkManager/NetworkManager.state
 
 # both screens: duo-hw switches the second panel (DSI-2) off unless /etc/duo/dual exists (or duo.dual=1)
 mkdir -p /etc/duo && touch /etc/duo/dual
