@@ -4,6 +4,11 @@ libqrtr: make HAVE_LIBUDEV=0 HAVE_LIBQRTR=1 CFLAGS="-O2 -DHAS_LIBQRTR=1" LDFLAGS
 - watch.c: a client write that got EAGAIN (unix SEQPACKET peer queue full, e.g. the modem's boot burst) stayed
   pending forever; the client queue stalled and, through flow control, the router stopped reading the modem's
   data channel. Requeue the message and retry once the socket is writable.
+- watch.c: a QRTR sendmsg() sleeps (O_NONBLOCK or not) while the remote port owes a RESUME_TX; the Duo's SLPI
+  never sent one and the router hung in io_submit() for good (boot4: modem DIAG stopped at 140 s). Writes are
+  interrupted after 50 ms (SIGALRM, no SA_RESTART) and retried every second; the rest of the router keeps running.
+- peripheral.c: client masks go only to peripherals whose control channel is up and whose DIAG ID exchange is
+  done (as downstream). Before, they were queued and flushed into the SLPI ahead of its handshake.
 - peripheral-qrtr.c: forward every non-HDLC frame of a QRTR packet (the modem packs several), 64 KiB receive
   buffer, per-peripheral data counters every 10 s.
 - diag_cntl.c: feature mask as the downstream APPS diag (MASK_CENTRALIZATION, no MASTER_SETS_COMMON_MASK); with
@@ -24,8 +29,21 @@ index a65d348..b4284a8 100644
  	for (;;) {
  		c = getopt(argc, argv, "hs:u:");
  		if (c < 0)
+diff --git a/router/diag.h b/router/diag.h
+index a3aa09c..a377340 100644
+--- a/router/diag.h
++++ b/router/diag.h
+@@ -90,6 +90,8 @@ struct peripheral {
+ 	struct watch_flow *flow;
+ 
+ 	int diag_id;
++	/* the DIAG ID exchange is done (masks go only after it when the peripheral supports DIAG ID) */
++	bool diag_id_done;
+ 
+ 	bool sockets;
+ 
 diff --git a/router/diag_cntl.c b/router/diag_cntl.c
-index 7c94ac9..3e6097a 100644
+index 7c94ac9..62fffae 100644
 --- a/router/diag_cntl.c
 +++ b/router/diag_cntl.c
 @@ -276,8 +276,9 @@ static int diag_cntl_feature_mask(struct peripheral *peripheral,
@@ -53,11 +71,12 @@ index 7c94ac9..3e6097a 100644
  	diag_cntl_send_masks(peripheral);
  	diag_cntl_set_diag_mode(peripheral, true);
  	diag_cntl_set_buffering_mode(peripheral, 0);
-@@ -685,6 +691,13 @@ static int diag_cntl_process_diag_id(struct peripheral *peripheral, struct diag_
+@@ -685,6 +691,14 @@ static int diag_cntl_process_diag_id(struct peripheral *peripheral, struct diag_
  	len = resp->hdr.len + sizeof(resp->hdr);
  
  	queue_push(&peripheral->cntlq, resp, len);
 +	printf("[%s] diag id %u for %s; sending masks\n", peripheral->name, diag_id, process_name);
++	peripheral->diag_id_done = true;
 +
 +	/* downstream sends the masks only after the DIAG ID exchange (diag_send_updates_peripheral) */
 +	diag_cntl_send_masks(peripheral);
@@ -67,7 +86,7 @@ index 7c94ac9..3e6097a 100644
  	return 0;
  }
  
-@@ -715,6 +728,12 @@ int diag_cntl_recv(struct peripheral *peripheral, const void *buf, size_t n)
+@@ -715,6 +729,12 @@ int diag_cntl_recv(struct peripheral *peripheral, const void *buf, size_t n)
  			break;
  		case DIAG_CNTL_CMD_NUM_PRESETS:
  			break;
@@ -81,7 +100,7 @@ index 7c94ac9..3e6097a 100644
  			diag_cntl_deregister(peripheral, hdr, n);
  			break;
 diff --git a/router/peripheral-qrtr.c b/router/peripheral-qrtr.c
-index 9a3c59a..05715fb 100644
+index 9a3c59a..48d84c2 100644
 --- a/router/peripheral-qrtr.c
 +++ b/router/peripheral-qrtr.c
 @@ -63,6 +63,65 @@ enum {
@@ -150,7 +169,16 @@ index 9a3c59a..05715fb 100644
  static int qrtr_cntl_recv(int fd, void *data)
  {
  	struct peripheral *perif = data;
-@@ -122,7 +181,6 @@ struct non_hdlc_pkt {
+@@ -102,6 +161,8 @@ static int qrtr_cntl_recv(int fd, void *data)
+ 	case QRTR_TYPE_BYE:
+ 		watch_remove_writeq(perif->cntl_fd);
+ 		perif->cntl_open = false;
++		perif->diag_id_done = false;
++		printf("[%s] control channel BYE\n", perif->name);
+ 		break;
+ 	default:
+ 		fprintf(stderr, "Unhandled DIAG CNTL message from %d:%d (%d)\n",
+@@ -122,7 +183,6 @@ struct non_hdlc_pkt {
  static int qrtr_cmd_recv(int fd, void *data)
  {
  	struct peripheral *perif = data;
@@ -158,7 +186,7 @@ index 9a3c59a..05715fb 100644
  	struct sockaddr_qrtr cmdsq;
  	struct sockaddr_qrtr sq;
  	struct qrtr_packet pkt;
-@@ -150,23 +208,7 @@ static int qrtr_cmd_recv(int fd, void *data)
+@@ -150,23 +210,7 @@ static int qrtr_cmd_recv(int fd, void *data)
  	case QRTR_TYPE_DEL_CLIENT:
  		break;
  	case QRTR_TYPE_DATA:
@@ -183,7 +211,7 @@ index 9a3c59a..05715fb 100644
  		break;
  	case QRTR_TYPE_NEW_SERVER:
  		if (pkt.node == 0 && pkt.port == 0)
-@@ -199,11 +241,10 @@ static int qrtr_data_recv(int fd, void *data)
+@@ -199,11 +243,10 @@ static int qrtr_data_recv(int fd, void *data)
  	struct peripheral *perif = data;
  	struct sockaddr_qrtr sq;
  	struct qrtr_packet pkt;
@@ -197,7 +225,7 @@ index 9a3c59a..05715fb 100644
  
  	sl = sizeof(sq);
  	n = recvfrom(fd, buf, sizeof(buf), 0, (void *)&sq, &sl);
-@@ -216,7 +257,7 @@ static int qrtr_data_recv(int fd, void *data)
+@@ -216,7 +259,7 @@ static int qrtr_data_recv(int fd, void *data)
  
  	ret = qrtr_decode(&pkt, buf, n, &sq);
  	if (ret < 0) {
@@ -206,7 +234,7 @@ index 9a3c59a..05715fb 100644
  		return ret;
  	}
  
-@@ -228,27 +269,14 @@ static int qrtr_data_recv(int fd, void *data)
+@@ -228,27 +271,14 @@ static int qrtr_data_recv(int fd, void *data)
  			connect(perif->data_fd, (struct sockaddr *)&sq, sizeof(sq));
  			perif->data_open = true;
  			watch_add_writeq(perif->data_fd, &perif->dataq);
@@ -237,7 +265,7 @@ index 9a3c59a..05715fb 100644
  		break;
  	default:
  		fprintf(stderr, "Unhandled DIAG DATA message from %d:%d (%d)\n",
-@@ -336,5 +364,7 @@ int peripheral_qrtr_init(void)
+@@ -336,5 +366,7 @@ int peripheral_qrtr_init(void)
  	qrtr_perif_init_subsystem("wdsp", DIAG_INSTANCE_BASE_WDSP);
  	qrtr_perif_init_subsystem("soccp", DIAG_INSTANCE_BASE_SOCCP);
  
@@ -246,14 +274,56 @@ index 9a3c59a..05715fb 100644
  	return 0;
  }
 diff --git a/router/peripheral.c b/router/peripheral.c
-index 1b63a58..7ece8f5 100644
+index 1b63a58..9c7f145 100644
 --- a/router/peripheral.c
 +++ b/router/peripheral.c
-@@ -101,6 +101,10 @@ void peripheral_broadcast_msg_mask(struct diag_ssid_range_t *range)
+@@ -69,6 +69,21 @@ int peripheral_init(void)
+ 	return 0;
+ }
+ 
++/*
++ * Masks set by a client go only to peripherals whose control channel is up and, when they support DIAG ID,
++ * whose DIAG ID exchange is done (as downstream). Otherwise they were queued and flushed into a peripheral
++ * ahead of the handshake when it came up: the Duo's SLPI did not read them, QRTR flow control blocked the
++ * router in sendmsg and the whole DIAG stream stopped.
++ */
++static bool peripheral_ready(struct peripheral *peripheral)
++{
++	if (peripheral->sockets && !peripheral->cntl_open)
++		return false;
++	if ((peripheral->features & DIAG_FEATURE_DIAG_ID) && !peripheral->diag_id_done)
++		return false;
++	return true;
++}
++
+ void peripheral_broadcast_event_mask(void)
+ {
+ 	struct peripheral *peripheral;
+@@ -77,6 +92,8 @@ void peripheral_broadcast_event_mask(void)
+ 	list_for_each(item, &peripherals) {
+ 		peripheral = container_of(item, struct peripheral, node);
+ 
++		if (!peripheral_ready(peripheral))
++			continue;
+ 		diag_cntl_send_event_mask(peripheral);
+ 	}
+ }
+@@ -89,6 +106,8 @@ void peripheral_broadcast_log_mask(unsigned int equip_id)
+ 	list_for_each(item, &peripherals) {
+ 		peripheral = container_of(item, struct peripheral, node);
+ 
++		if (!peripheral_ready(peripheral))
++			continue;
+ 		diag_cntl_send_log_mask(peripheral, equip_id);
+ 	}
+ }
+@@ -101,6 +120,12 @@ void peripheral_broadcast_msg_mask(struct diag_ssid_range_t *range)
  	list_for_each(item, &peripherals) {
  		peripheral = container_of(item, struct peripheral, node);
  
 -		diag_cntl_send_msg_mask(peripheral, range);
++		if (!peripheral_ready(peripheral))
++			continue;
 +		/* "set all" passes no range: send every range (a NULL range crashed the router) */
 +		if (range)
 +			diag_cntl_send_msg_mask(peripheral, range);
@@ -262,23 +332,78 @@ index 1b63a58..7ece8f5 100644
  	}
  }
 diff --git a/router/watch.c b/router/watch.c
-index 21ea4c4..5e5ad8d 100644
+index 21ea4c4..6222c68 100644
 --- a/router/watch.c
 +++ b/router/watch.c
-@@ -69,6 +69,8 @@ struct watch {
+@@ -36,6 +36,7 @@
+ #include <linux/aio_abi.h>
+ 
+ #include <assert.h>
++#include <signal.h>
+ #include <err.h>
+ #include <errno.h>
+ #include <stdbool.h>
+@@ -69,6 +70,11 @@ struct watch {
  	struct mbuf *pending_aio;
  
  	bool is_write;
 +	/* a write got EAGAIN: its mbuf is back at the queue head, wait for the fd to be writable */
 +	bool wait_writable;
++	/* a write blocked (QRTR flow control: the remote sends no RESUME_TX): retry from this time on */
++	struct timeval retry_at;
++	unsigned long blocked;
  
  	struct watch_flow *flow;
  
-@@ -403,8 +405,25 @@ static void watch_handle_eventfd(int evfd, aio_context_t ioctx)
+@@ -369,7 +375,16 @@ static void watch_submit_aio(aio_context_t ioctx, int evfd, struct watch *w)
+ 	iocb->aio_flags = IOCB_FLAG_RESFD;
+ 	iocb->aio_resfd = evfd;
+ 
++	/*
++	 * io_submit() writes a socket synchronously. A QRTR sendmsg() sleeps (O_NONBLOCK or not) while the
++	 * remote port has not answered the confirm_rx of earlier packets, which stalled the whole router.
++	 * Interrupt such a write after 50 ms; it completes with -EINTR and is retried later.
++	 */
++	if (w->is_write)
++		setitimer(ITIMER_REAL, &(struct itimerval){ .it_value = { 0, 50000 } }, NULL);
+ 	ret = io_submit(ioctx, 1, &iocb);
++	if (w->is_write)
++		setitimer(ITIMER_REAL, &(struct itimerval){ 0 }, NULL);
+ 	if (ret != 1)
+ 		fprintf(stderr, "io_submit failed: %d (%d)\n", ret, errno);
+ 
+@@ -379,6 +394,10 @@ static void watch_submit_aio(aio_context_t ioctx, int evfd, struct watch *w)
+ 	}
+ }
+ 
++static void watch_alarm(int sig)
++{
++}
++
+ static void watch_handle_eventfd(int evfd, aio_context_t ioctx)
+ {
+ 	struct io_event ev[32];
+@@ -403,8 +422,41 @@ static void watch_handle_eventfd(int evfd, aio_context_t ioctx)
  			if (iocb->aio_fildes == w->fd) {
  				assert(w->pending_aio);
  
 -				if (ev[i].res == -EAGAIN)
++				if (w->is_write && ev[i].res == -EINTR) {
++					struct mbuf *m = w->pending_aio;
++
++					m->node.next = w->queue->next;
++					m->node.prev = w->queue;
++					w->queue->next->prev = &m->node;
++					w->queue->next = &m->node;
++					w->pending_aio = NULL;
++					gettimeofday(&w->retry_at, NULL);
++					w->retry_at.tv_sec += 1;
++					if (w->blocked++ < 5 || !(w->blocked % 60))
++						fprintf(stderr, "watch: write to fd %d blocked (%lu times), retrying in 1 s\n",
++							w->fd, w->blocked);
+ 					continue;
++				}
++
 +				if (ev[i].res == -EAGAIN) {
 +					/*
 +					 * Non-blocking client socket full (a unix SEQPACKET peer queues only
@@ -296,20 +421,30 @@ index 21ea4c4..5e5ad8d 100644
 +						w->pending_aio = NULL;
 +						w->wait_writable = true;
 +					}
- 					continue;
++					continue;
 +				}
  
  				if (!w->is_write && ev[i].res >= 0)
  					w->pending_aio->offset = ev[i].res;
-@@ -428,6 +447,7 @@ void watch_run(void)
+@@ -428,6 +480,8 @@ void watch_run(void)
  	struct watch *next;
  	struct watch *w;
  	fd_set rfds;
 +	fd_set wfds;
++	bool retrying;
  	int evfd;
  	int nfds;
  	int ret;
-@@ -442,6 +462,7 @@ void watch_run(void)
+@@ -436,12 +490,16 @@ void watch_run(void)
+ 	if (evfd < 0)
+ 		err(1, "failed to create eventfd");
+ 
++	/* no SA_RESTART: the alarm must interrupt a blocked write (watch_submit_aio) */
++	sigaction(SIGALRM, &(struct sigaction){ .sa_handler = watch_alarm }, NULL);
++
+ 	ret = io_setup(32, &ioctx);
+ 	if (ret < 0)
+ 		err(1, "failed to initialize aio context");
  
  	while (!do_watch_quit) {
  		FD_ZERO(&rfds);
@@ -317,10 +452,20 @@ index 21ea4c4..5e5ad8d 100644
  		FD_SET(evfd, &rfds);
  
  		nfds = evfd + 1;
-@@ -457,6 +478,11 @@ void watch_run(void)
+@@ -456,7 +514,21 @@ void watch_run(void)
+ 			nfds = MAX(w->fd + 1, nfds);
  		}
  
++		retrying = false;
++		gettimeofday(&now, NULL);
  		list_for_each_entry(w, &aio_watches, node) {
++			if (w->retry_at.tv_sec) {
++				if (timercmp(&now, &w->retry_at, <)) {
++					retrying = true;
++					continue;
++				}
++				timerclear(&w->retry_at);
++			}
 +			if (w->wait_writable) {
 +				FD_SET(w->fd, &wfds);
 +				nfds = MAX(w->fd + 1, nfds);
@@ -329,16 +474,34 @@ index 21ea4c4..5e5ad8d 100644
  			/* Submit AIO if none is pending */
  			if (!list_empty(w->queue) && !w->pending_aio)
  				watch_submit_aio(ioctx, evfd, w);
-@@ -475,7 +501,7 @@ void watch_run(void)
+@@ -475,13 +547,25 @@ void watch_run(void)
  			timeout = NULL;
  		}
  
 -		ret = select(nfds, &rfds, NULL, NULL, timeout);
++		/* come back to retry blocked writes */
++		if (retrying && (!timeout || tv.tv_sec > 0 || tv.tv_usec > 100000)) {
++			tv.tv_sec = 0;
++			tv.tv_usec = 100000;
++			timeout = &tv;
++		}
++
 +		ret = select(nfds, &rfds, &wfds, NULL, timeout);
++		if (ret < 0 && errno == EINTR)
++			continue;
  		if (ret < 0) {
  			warn("failed to select");
  			break;
-@@ -490,6 +516,13 @@ void watch_run(void)
+ 		}
+ 
+ 		if (ret == 0 && timer) {
++			gettimeofday(&now, NULL);
++		}
++		if (ret == 0 && timer && !timercmp(&now, &timer->tick, <)) {
+ 			timer->cb(timer->data);
+ 
+ 			if (timer->repeat)
+@@ -490,6 +574,13 @@ void watch_run(void)
  				watch_free_timer(timer);
  		}
  
