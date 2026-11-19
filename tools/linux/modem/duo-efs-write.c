@@ -2,8 +2,10 @@
 // duo-efs-write: create, overwrite or delete small files in the Duo modem's EFS over DIAG, through linux-msm
 // diag-router (abstract unix socket "\0diag"), with the EFS2 diag subsystem commands (DIAG_SUBSYS_CMD 0x4b,
 // subsystem 19 = FS): MKDIR 9, OPEN 2 + WRITE 5 + CLOSE 3, UNLINK 8, RMDIR 10 (layouts as in QCSuper's efs_shell).
-// EFS is the modem's own persistent storage and is shared with Android: every write here survives reboots and
-// changes the modem's configuration under Android too. Use duo-efs (read-only) to look before and after.
+// EFS is the modem's own persistent storage. Where a write lands depends on rmtfs: with duo-rmtfs (rmtfs on Linux's
+// own EFS copy in /var/lib/duo-efs) it persists in that copy only; with `rmtfs -r -P` it lives in rmtfs's RAM until
+// the phone restarts; only an rmtfs writing the modemst partitions would change the EFS that Android uses too.
+// The modem flushes its EFS to rmtfs when it stops. Use duo-efs (read-only) to look before and after.
 // usage: duo-efs-write mkdir DIR | put PATH HEXBYTES | rm PATH | rmdir DIR
 //   e.g. duo-efs-write put /nv/item_files/modem/utils/mcpm/mcpm_quick_offline_cfg 01
 #include <poll.h>

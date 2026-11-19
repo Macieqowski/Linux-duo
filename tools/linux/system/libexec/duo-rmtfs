@@ -1,0 +1,43 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo: rmtfs on Linux's OWN copy of the modem's EFS (/var/lib/duo-efs) instead of the modemst partitions.
+# The partitions are only READ, once, to make the copy; they are never written, so Android keeps its EFS as it is.
+# What the modem writes to its EFS under Linux persists in the copy (with the old `rmtfs -r -P` it lived in rmtfs's
+# RAM until the next phone restart). Needed for the modem fix kept in EFS: /nv/item_files/modem/utils/mcpm/
+# mcpm_quick_offline_cfg = 01 turns off the modem's "quick offline" sleep, whose wake-up trips the RF QLink assertion
+# on mainline (2026-11-19). Write it once with tools/linux/modem/duo-efs-write (on a fresh boot: DIAG refuses EFS
+# commands after a modem restart), then restart the modem cleanly: the modem flushes its EFS to rmtfs only when it stops.
+# Start over from the partitions: stop rmtfs, delete /var/lib/duo-efs. Old read-only partition mode: create
+# /etc/duo/efs-partitions. Without a complete copy (partition unreadable) it also falls back to the old mode.
+# systemd: rmtfs.service.d/duo-efs-copy.conf runs this as rmtfs's ExecStart.
+D=/var/lib/duo-efs
+P=/dev/disk/by-partlabel
+PARTS="modemst1:modem_fs1 modemst2:modem_fs2 fsg:modem_fsg fsc:modem_fsc"
+log() { echo "duo-rmtfs: $*"; echo "duo-rmtfs: $*" > /dev/kmsg 2>/dev/null; }
+
+complete() {
+	for p in $PARTS; do [ -s "$1/${p##*:}" ] || return 1; done
+}
+
+copy() {
+	rm -rf "$D.new" && mkdir -p "$D.new" && chmod 700 "$D.new" || return 1
+	for p in $PARTS; do
+		src=$P/${p%%:*} dst=$D.new/${p##*:}
+		dd if="$src" of="$dst" bs=1M status=none 2>/dev/null || { log "cannot read ${p%%:*}"; return 1; }
+		[ "$(stat -c %s "$dst")" = "$(blockdev --getsize64 "$src")" ] || { log "short copy of ${p%%:*}"; return 1; }
+	done
+	sync "$D.new"/* && rm -rf "$D" && mv "$D.new" "$D" && sync
+}
+
+if [ ! -e /etc/duo/efs-partitions ]; then
+	if ! complete "$D"; then
+		copy && log "EFS copied from the modemst/fsg/fsc partitions (read only) to $D"
+	fi
+	if complete "$D"; then
+		log "rmtfs on the EFS copy in $D (partitions untouched)"
+		exec /usr/bin/rmtfs -o "$D" -s
+	fi
+	rm -rf "$D.new"
+	log "no EFS copy - falling back to the read-only partitions"
+fi
+exec /usr/bin/rmtfs -r -P -s
