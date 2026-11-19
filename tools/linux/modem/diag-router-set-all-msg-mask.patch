@@ -1,3 +1,17 @@
+diff --git a/router/diag.c b/router/diag.c
+index a65d348..b4284a8 100644
+--- a/router/diag.c
++++ b/router/diag.c
+@@ -139,6 +139,9 @@ int main(int argc, char **argv)
+ 	int ret;
+ 	int c;
+ 
++	/* line-buffered, so a log file shows the peripherals as they connect */
++	setvbuf(stdout, NULL, _IOLBF, 0);
++
+ 	for (;;) {
+ 		c = getopt(argc, argv, "hs:u:");
+ 		if (c < 0)
 diff --git a/router/peripheral.c b/router/peripheral.c
 index 1b63a58..7ece8f5 100644
 --- a/router/peripheral.c
