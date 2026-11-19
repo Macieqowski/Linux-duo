@@ -84,7 +84,7 @@ fi
 
 if [ -n "$KOUT" ]; then
   KREL=$(cat "$KOUT/include/config/kernel.release"); log "kernel modules $KREL"
-  make -s -C "$KOUT" ARCH=arm64 INSTALL_MOD_PATH="$R/usr" INSTALL_MOD_STRIP=1 modules_install
+  make -s -C "$KOUT" ARCH=arm64 CROSS_COMPILE=${CROSS_COMPILE:-aarch64-linux-gnu-} INSTALL_MOD_PATH="$R/usr" INSTALL_MOD_STRIP=1 modules_install
   rm -f "$R/usr/lib/modules/$KREL/build" "$R/usr/lib/modules/$KREL/source"
   in_chroot depmod -a "$KREL"
 fi

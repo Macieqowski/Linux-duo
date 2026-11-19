@@ -43,7 +43,7 @@ CMD="rdinit=/init clk_ignore_unused pd_ignore_unused console=tty0 loglevel=4 pan
 
 log "module package"
 M=$W/modules; rm -rf "$M"; mkdir -p "$M/usr/lib/duo/$KREL"
-make -s -C "$KO" ARCH=arm64 INSTALL_MOD_PATH="$M/usr" INSTALL_MOD_STRIP=1 modules_install
+make -s -C "$KO" ARCH=arm64 CROSS_COMPILE=${CROSS_COMPILE:-aarch64-linux-gnu-} INSTALL_MOD_PATH="$M/usr" INSTALL_MOD_STRIP=1 modules_install
 rm -f "$M/usr/lib/modules/$KREL/build" "$M/usr/lib/modules/$KREL/source"
 depmod -b "$M/usr" "$KREL"
 # the flat module set the duo-* services insmod from /usr/lib/duo/<release> (the same set the RAM workbench carries)
