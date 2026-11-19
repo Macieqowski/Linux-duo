@@ -1,0 +1,17 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo, Plasma Mobile (2026-11-19, request: "po restarcie głośność w pasku pokazuje 0%, a vol+/vol- ustawia ją
+# poprawnie"): the top panel's volume slider binds before it has the default sink (plasmashell: VolumeChangedPopup.qml
+# "Cannot read property 'volume' of null") and shows 0 % until the first volume change, although the sink is at its
+# saved volume. Run once at login (XDG autostart): when the sink is there, set its volume 1 % off and back, so the
+# panel gets a change event and shows the real value.
+i=0
+while [ $i -lt 30 ]; do
+	v=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | awk '/^Volume:/ {print $2}')
+	[ -n "$v" ] && break
+	i=$((i + 1)); sleep 1
+done
+[ -n "$v" ] || exit 0
+sleep 5
+n=$(awk -v v="$v" 'BEGIN { x = (v >= 0.01) ? v - 0.01 : v + 0.01; printf "%.2f", x }')
+wpctl set-volume @DEFAULT_AUDIO_SINK@ "$n" && sleep 0.3 && wpctl set-volume @DEFAULT_AUDIO_SINK@ "$v"

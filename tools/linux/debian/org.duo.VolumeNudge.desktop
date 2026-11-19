@@ -1,0 +1,8 @@
+[Desktop Entry]
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo, Debian/Plasma (2026-11-19): refresh the panel's volume slider after login, see duo-volume-nudge.
+Type=Application
+Name=Duo volume slider refresh
+Exec=/usr/libexec/duo/duo-volume-nudge
+NoDisplay=true
+X-KDE-autostart-phase=2
