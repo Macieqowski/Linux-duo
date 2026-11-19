@@ -1,0 +1,105 @@
+From caf12c3e8f0f355a6596ef5d81ca402ed4cc02b8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 11:39:50 +0000
+Subject: [PATCH 20/20] Surface Duo: in-call audio (q6voice) DT services +
+ VoiceMMode1 link, Q6VOICE=m, q6voice dt-binding header
+
+---
+ .../sm8150-microsoft-surface-duo-audio.dtsi   | 38 +++++++++++++++++++
+ arch/arm64/configs/duo.config                 |  1 +
+ include/dt-bindings/sound/qcom,q6voice.h      |  8 ++++
+ 3 files changed, 47 insertions(+)
+ create mode 100644 include/dt-bindings/sound/qcom,q6voice.h
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi
+index 0584578f5..bdd1a0620 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi
+@@ -18,6 +18,7 @@
+ #include <dt-bindings/soc/qcom,apr.h>
+ #include <dt-bindings/sound/qcom,q6afe.h>
+ #include <dt-bindings/sound/qcom,q6asm.h>
++#include <dt-bindings/sound/qcom,q6voice.h>
+ 
+ / {
+ 	/* Required by the Duo's ABL to pick this DTB (Android dtb: msm-id 0x153 v2, DV_A board-id). */
+@@ -82,6 +83,12 @@ codec {
+ 			};
+ 		};
+ 
++		voicemmode1-dai-link {
++			link-name = "VoiceMMode1";
++			cpu {
++				sound-dai = <&q6voicedai VOICEMMODE1>;
++			};
++		};
+ 	};
+ };
+ 
+@@ -285,6 +292,37 @@ speaker {
+ 					};
+ 				};
+ 			};
++
++			/*
++			 * In-call audio (q6voice, sdm845-mainline "hack!" series): the modem's voice stream is
++			 * mixed in the ADSP; MVM/CVS/CVP are the voice services, VoiceMMode1 the call path.
++			 */
++			q6mvm: service@9 {
++				compatible = "qcom,q6mvm";
++				reg = <APR_SVC_ADSP_MVM>;
++				qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
++				q6voicedai: dais {
++					compatible = "qcom,q6voice-dais";
++					#address-cells = <1>;
++					#size-cells = <0>;
++					#sound-dai-cells = <1>;
++					dai@1 {
++						reg = <VOICEMMODE1>;
++					};
++				};
++			};
++
++			q6cvs: service@a {
++				compatible = "qcom,q6cvs";
++				reg = <APR_SVC_ADSP_CVS>;
++				qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
++			};
++
++			q6cvp: service@b {
++				compatible = "qcom,q6cvp";
++				reg = <APR_SVC_ADSP_CVP>;
++				qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
++			};
+ 		};
+ 	};
+ };
+diff --git a/arch/arm64/configs/duo.config b/arch/arm64/configs/duo.config
+index f08320a99..0d8f81149 100644
+--- a/arch/arm64/configs/duo.config
++++ b/arch/arm64/configs/duo.config
+@@ -301,6 +301,7 @@ CONFIG_SND_SOC_MT8365_MT6357=y
+ CONFIG_SND_SOC_NAU8822=y
+ CONFIG_SND_SOC_QCOM=y
+ CONFIG_SND_SOC_QDSP6_USB=y
++CONFIG_SND_SOC_QDSP6_Q6VOICE=m
+ CONFIG_SND_SOC_RCAR=y
+ CONFIG_SND_SOC_RK3308=y
+ CONFIG_SND_SOC_RK3399_GRU_SOUND=y
+diff --git a/include/dt-bindings/sound/qcom,q6voice.h b/include/dt-bindings/sound/qcom,q6voice.h
+new file mode 100644
+index 000000000..3c6552bd2
+--- /dev/null
++++ b/include/dt-bindings/sound/qcom,q6voice.h
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: GPL-2.0 OR MIT */
++#ifndef __DT_BINDINGS_Q6_VOICE_H__
++#define __DT_BINDINGS_Q6_VOICE_H__
++
++#define CS_VOICE	0
++#define VOICEMMODE1	1
++
++#endif /* __DT_BINDINGS_Q6_VOICE_H__ */
+-- 
+2.43.0
+
