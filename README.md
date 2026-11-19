@@ -73,7 +73,11 @@ Linuksem, zostaje w kopii. Android dalej używa swoich partycji, bez wpisu.
 **Włączenie** (raz, na świeżo uruchomionym telefonie: po każdym restarcie modemu DIAG odrzuca komendy EFS, błąd
 0x13, aż do restartu telefonu). Potrzebne `duo-efs` i `duo-efs-write` z `tools/linux/modem/` (statycznie dla
 aarch64, np. `aarch64-linux-gnu-gcc -static -O2 -o duo-efs-write duo-efs-write.c`) i działający `diag-router`
-(usługa `duo-diag`):
+(usługa `duo-diag`).
+
+Bez wpisu modem często pada sam w pierwszej minucie po starcie, zanim zdąży się go zapisać. Dlatego na ten jeden
+start wyłącz ModemManager (`systemctl mask ModemManager`, sync, restart telefonu): modem zostaje wtedy w trybie
+niskiego poboru, nie szuka sieci i nie pada. Potem:
 
 ```sh
 duo-efs-write mkdir /nv/item_files/modem/utils
@@ -83,8 +87,12 @@ duo-efs cat /nv/item_files/modem/utils/mcpm/mcpm_quick_offline_cfg     # ma poka
 # czysty restart modemu: modem zapisuje EFS przy zatrzymaniu i czyta wpis przy starcie
 M=$(echo /sys/bus/platform/devices/4080000.remoteproc/remoteproc/remoteproc*)
 echo stop > $M/state; sleep 2; echo start > $M/state
+systemctl unmask ModemManager; systemctl start ModemManager
 sync
 ```
+
+Na koniec `mkdir -p /etc/duo && touch /etc/duo/modem-all-rats`: bez tego `duo-modem` przy każdym starcie ustawia
+modemowi samo LTE (zabezpieczenie sprzed obejścia), a wtedy połączenia przychodzące (CSFB do 2G) nie działają.
 
 Nie restartuj modemu po jego awarii (wtedy zawiesza się TrustZone i telefon się resetuje); po awarii tylko reset
 telefonu (power + głośność w dół).
