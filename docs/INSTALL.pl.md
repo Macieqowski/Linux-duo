@@ -1,7 +1,7 @@
 # Instalacja na Surface Duo 1
 
-Wszystko robi się z komputera z Linuxem (albo Windows + WSL2 z `usbipd`). Na telefonie zapisywana jest **tylko
-partycja `userdata`**.
+Wszystko robi się z komputera z Linuxem albo z Windowsem 11 (sekcja „Z Windowsa” niżej). Na telefonie zapisywana
+jest **tylko partycja `userdata`**.
 
 ## 0. Potrzebne
 
@@ -40,6 +40,31 @@ scripts/install-debian.sh duo-debian.img duo-debian-rootfs.tar.zst duo-modules-*
 
 Skrypt uruchamia obraz z RAM-u, pyta o potwierdzenie (wpisz `YES`), formatuje `userdata`, kopiuje Debiana do
 `/debian` i resetuje telefon.
+
+## 3a. Z Windowsa (11)
+
+Skrypt `scripts\install-debian.ps1` robi to samo co wersja dla Linuxa. **Nie był jeszcze sprawdzony na Windowsie.**
+
+1. Zainstaluj:
+   - [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools) (rozpakuj, np. do
+     `C:\platform-tools`, albo wrzuć `fastboot.exe` i jego pliki `.dll` do folderu repozytorium),
+   - [Python 3](https://www.python.org/downloads/) (zaznacz „Add python.exe to PATH”),
+   - klienta OpenSSH: Ustawienia → System → Funkcje opcjonalne → OpenSSH Client (w Windows 11 zwykle już jest).
+2. Pobierz repozytorium jako ZIP (GitHub → Code → Download ZIP, gałąź `claude/project-thread-5w521w`) i rozpakuj.
+   Rozpakuj też oba artefakty, a pliki `duo-debian.img`, `duo-debian-rootfs.tar.zst` i `duo-modules-*.tar.zst` włóż do
+   folderu repozytorium.
+3. Telefon w menu bootloadera, kabel podłączony. W PowerShellu, w folderze repozytorium:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\install-debian.ps1 duo-debian.img duo-debian-rootfs.tar.zst (Get-Item duo-modules-*.tar.zst).Name
+   ```
+
+Jeśli `fastboot devices` nic nie pokazuje, Windows nie ma sterownika bootloadera: zainstaluj
+[Google USB Driver](https://developer.android.com/studio/run/win-usb) i w Menedżerze urządzeń wybierz dla telefonu
+„Android Bootloader Interface”. Po starcie z RAM-u telefon pojawia się jako karta sieciowa USB (wbudowany sterownik
+UsbNcm w Windows 11). Windows 10 nie ma tego sterownika, więc na nim trzeba użyć Linuxa (np. Ubuntu z pendrive'a).
+
+Każdy kolejny start z Windowsa: `fastboot --set-active=a`, potem `fastboot boot duo-debian-key.img`.
 
 ## 4. Każdy kolejny start
 
