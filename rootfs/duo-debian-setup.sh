@@ -8,10 +8,6 @@ set -e
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 apt-get -q update
 
-# Mesa from backports: newer freedreno/turnip for the Adreno 640
-apt-get -q -y -t trixie-backports install libegl-mesa0 libgbm1 libgl1-mesa-dri libglx-mesa0 mesa-libgallium \
-  mesa-vulkan-drivers || echo "WARNING: Mesa from backports failed, keeping trixie's"
-
 # the Duo's hardware userspace (must all install)
 apt-get -q -y --no-install-recommends install sddm hexagonrpcd iio-sensor-proxy modemmanager rmtfs tqftpserv \
   protection-domain-mapper qrtr-tools umtp-responder avahi-daemon alsa-ucm-conf alsa-utils python3-dbus python3-gi \
@@ -29,6 +25,11 @@ for p in plasma-dialer spacebar plasma-settings maliit-keyboard angelfish kclock
          discover plasma-discover-backend-flatpak flatpak chromium gnome-snapshot hfd-service plasma-mobile-tweaks; do
   apt-get -q -y install "$p" > /tmp/apt-$p.log 2>&1 && echo "installed $p" || echo "not available: $p"
 done
+
+# Mesa from backports: newer freedreno/turnip for the Adreno 640. Last, after everything from trixie: backports' Mesa
+# pulls a newer libelf, and trixie packages installed after it (bluez -> libdw) would then not resolve.
+apt-get -q -y -t trixie-backports install libegl-mesa0 libgbm1 libgl1-mesa-dri libglx-mesa0 mesa-libgallium \
+  mesa-vulkan-drivers || echo "WARNING: Mesa from backports failed, keeping trixie's"
 
 # the phone's user: auto-login, no password (set one with `passwd` on the phone before enabling SSH passwords)
 id user > /dev/null 2>&1 || useradd -m -u 10000 -s /bin/bash -G audio,video,input,render,plugdev,netdev,dialout,sudo user
