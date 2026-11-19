@@ -24,7 +24,7 @@ $Img = (Resolve-Path -LiteralPath $Img).Path
 $Rootfs = (Resolve-Path -LiteralPath $Rootfs).Path
 $Modules = (Resolve-Path -LiteralPath $Modules).Path
 
-$env:PATH = "$PSScriptRoot;$H;$env:PATH"
+$env:PATH = "$PSScriptRoot;$H;$H\platform-tools;$H\python;$env:PATH"   # unpacked next to the repo: no installs needed
 foreach ($t in @('fastboot', 'ssh', 'ssh-keygen')) {
   if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { Fail "missing tool: $t" }
 }
