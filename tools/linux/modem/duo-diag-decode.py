@@ -107,7 +107,9 @@ def decode(pkt, qdb):
         return ts, f'F3 {ssid}/{lvl:x} {fn}:{line}{" DROP%d" % drop if drop else ""}  {cformat(fmt, args)}'
     if c == 0x99 and len(pkt) >= 18:
         _, _, nsz, drop, ts, h, _ = struct.unpack('<BBBBQIH', pkt[:18])
-        na, sz = nsz >> 4, nsz & 15
+        # high nibble = bytes per argument (1..4), low nibble = number of arguments: counts of 5..8 occur with
+        # 2- and 4-byte arguments in the Duo's stream (SCAT reads it the other way round)
+        sz, na = nsz >> 4, nsz & 15
         args = []
         for i in range(na):
             if sz:

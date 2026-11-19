@@ -127,8 +127,8 @@ static void show_f3(const uint8_t *p, size_t n, double now)
 }
 
 // 0x92 (QShrink 2): the 0x79 header, then a 32-bit hash and 32-bit args.
-// 0x99 (QShrink 4, layout as SCAT parses it): cmd ts_type num/size drop ts(8) hash(4) unk(2), then args packed
-// (num = high nibble, bytes per arg = low nibble); the hash is an offset into the modem's qdsp6m.qdb.
+// 0x99 (QShrink 4): cmd ts_type size/num drop ts(8) hash(4) unk(2), then args packed (bytes per arg = high nibble,
+// num = low nibble, the reverse of SCAT); the hash is an offset into the modem's qdsp6m.qdb.
 static void show_qsr(const uint8_t *p, size_t n, double now)
 {
 	if (p[0] == 0x92) {
@@ -143,7 +143,7 @@ static void show_qsr(const uint8_t *p, size_t n, double now)
 	}
 	if (n < 18)
 		return;
-	unsigned na = p[2] >> 4, sz = p[2] & 15;
+	unsigned sz = p[2] >> 4, na = p[2] & 15; // high nibble = bytes per argument, low nibble = count
 	printf("%10.3f m%10.3f qsr4 hash 0x%08x", now, mts(p + 4), rd32(p + 12));
 	for (unsigned i = 0; i < na && sz && 18 + sz * (i + 1) <= n; i++) {
 		uint32_t v = 0;
