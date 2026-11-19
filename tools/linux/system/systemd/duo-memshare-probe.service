@@ -1,0 +1,13 @@
+# Test only: log the modem's QMI memshare (0x34) requests to the journal (tools/linux/modem/duo-memshare-probe.c).
+[Unit]
+Description=Duo modem memshare probe (log only)
+DefaultDependencies=no
+After=local-fs.target
+Before=ModemManager.service
+
+[Service]
+ExecStart=/usr/local/bin/duo-memshare-probe
+Restart=no
+
+[Install]
+WantedBy=sysinit.target
