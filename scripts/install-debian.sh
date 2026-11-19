@@ -47,6 +47,8 @@ $SSH $PHONE "set -e; umount /dev/$P 2>/dev/null || true; mkfs.ext4 -q -F -L duo-
 echo "4/4 copying Debian (this takes a while)"
 zstd -dc "$ROOTFS" | $SSH $PHONE "tar -x -C /mnt/u/debian"
 zstd -dc "$MODS" | $SSH $PHONE "tar -x -C /mnt/u/debian"
+# root logs in with the same key on the installed system (Debian's sshd: key only for root)
+$SSH $PHONE "set -e; mkdir -p -m 700 /mnt/u/debian/root/.ssh; tr -d '\\r' > /mnt/u/debian/root/.ssh/authorized_keys; chmod 600 /mnt/u/debian/root/.ssh/authorized_keys" < "$KEY.pub"
 $SSH $PHONE "set -e; chmod 1777 /mnt/u/debian/tmp; sync; umount /mnt/u; echo copied"
 
 cat <<EOF

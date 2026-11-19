@@ -97,6 +97,9 @@ PhoneRun 'zstd -dc | tar -x -C /mnt/u/debian' $Rootfs | Out-Host
 if ($script:Rc -ne 0) { Fail "copying the root file system failed" }
 PhoneRun 'zstd -dc | tar -x -C /mnt/u/debian' $Modules | Out-Host
 if ($script:Rc -ne 0) { Fail "copying the kernel modules failed" }
+# root logs in with the same key on the installed system (Debian's sshd: key only for root)
+PhoneRun "set -e; mkdir -p -m 700 /mnt/u/debian/root/.ssh; tr -d '\r' > /mnt/u/debian/root/.ssh/authorized_keys; chmod 600 /mnt/u/debian/root/.ssh/authorized_keys" "$Key.pub" | Out-Null
+if ($script:Rc -ne 0) { Fail "installing the SSH key failed" }
 PhoneRun 'set -e; chmod 1777 /mnt/u/debian/tmp; sync; umount /mnt/u; echo copied' | Out-Host
 if ($script:Rc -ne 0) { Fail "finishing the copy failed" }
 
