@@ -23,10 +23,17 @@ for r in /sys/class/remoteproc/remoteproc*; do
 	[ "$(cat $r/name 2>/dev/null)" = adsp ] && [ "$(cat $r/state 2>/dev/null)" = offline ] && echo start > $r/state 2>/dev/null
 done
 
-IPA=$(duo_modules)/ipa.ko
-if [ -f "$IPA" ] && [ ! -d /sys/module/ipa ]; then
+# IPA: its GSI firmware linked first, then the driver. udev may have auto-loaded ipa.ko from /usr/lib/modules before
+# these links existed (Debian 2026-11-19: "error -2 requesting qcom/sm8150/ipa_fws.mdt", module loaded but no device
+# bound - then neither IPA nor the veth stand-in below, and ModemManager dropped the modem: "no net port"); 50-duo-ipa
+# .conf blacklists the auto-load, and an unbound ipa module is reloaded here.
+ipa_bound() { ls -d /sys/bus/platform/drivers/ipa/*.ipa > /dev/null 2>&1; }
+IPA=$(duo_modules)/ipa.ko; [ -f "$IPA" ] || IPA=$(modinfo -n ipa 2>/dev/null)
+if [ -n "$IPA" ] && [ -f "$IPA" ] && ! ipa_bound; then
 	vendor_mount && for f in /mnt/vendor-fw/firmware/ipa_fws.*; do [ -e "$f" ] && ln -sf "$f" "$F/qcom/sm8150/${f##*/}"; done
-	insmod "$IPA" 2>/dev/null && log "IPA loaded (mobile data path)"
+	[ -d /sys/module/ipa ] && rmmod ipa 2>/dev/null
+	insmod "$IPA" 2>/dev/null; sleep 1
+	ipa_bound && log "IPA loaded (mobile data path)" || log "IPA did not bind - QMI without mobile data (veth stand-in)"
 fi
 
 R=""
@@ -43,7 +50,7 @@ log "modem DSP started (recovery off)"
 [ -n "$R" ] && ( for i in $(seq 1 120); do
 	[ "$(dmesg | grep -c 'crash detected in modem')" -ge 2 ] && { echo disabled > $R/recovery; break; }; sleep 1; done ) > /dev/null 2>&1 &
 # without IPA: a veth stand-in (78-duo-mm-qcom-soc.rules) lets ModemManager's qcom-soc plugin keep the QMI modem
-if [ ! -d /sys/module/ipa ]; then
+if ! ipa_bound; then
 	[ -e /sys/class/net/duo-qmi0 ] || ip link add duo-qmi0 type veth peer name duo-qmi1 2>/dev/null
 	ip link set duo-qmi0 up 2>/dev/null
 fi
