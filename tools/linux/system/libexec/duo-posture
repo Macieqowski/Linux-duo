@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Surface Duo posture (Debian/Plasma, 2026-11-19): follow the hinge like Android does.
 #   closed (hinge < 10 deg)          -> both panels off, touch off
-#   folded back (hinge > 330 deg)    -> one screen: DSI-2 (the camera side) stays, DSI-1 + its touch off (as Android)
+#   folded back (hinge > 330 deg)    -> one screen: DSI-2 (the camera side) stays, DSI-1 + its touch off
 #   anything else                    -> both screens
 # Runs in the Plasma session (autostart org.duo.Posture.desktop): kscreen-doctor and KWin's input devices need the
 # user's Wayland/D-Bus session. The hinge angle comes from the sensor DSP (duo-hinge, libssc). Hysteresis: 10/20 and
