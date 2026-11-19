@@ -59,6 +59,9 @@ printf '[Wallet]\nEnabled=false\nFirst Use=false\n' > /home/user/.config/kwallet
 MRC=/home/user/.config/plasmamobilerc; touch $MRC
 grep -q '^\[InitialStart\]' $MRC || printf '\n[InitialStart]\nwizardRun=true\n' >> $MRC
 
+# both screens: duo-hw switches the second panel (DSI-2) off unless /etc/duo/dual exists (or duo.dual=1)
+mkdir -p /etc/duo && touch /etc/duo/dual
+
 # touch under KWin: the digitizer (landscape) -> portrait panel, one digitizer per panel (measured by linuxduobench)
 cat > /home/user/.config/kcminputrc << 'KCM'
 [Libinput][1118][3073][IPTSD Virtual Touchscreen 045E:0C01]
