@@ -1,0 +1,354 @@
+diag-router (linux-msm/diag 23c12c1) changes for the Duo's modem DIAG over QRTR. Build static for aarch64 with
+libqrtr: make HAVE_LIBUDEV=0 HAVE_LIBQRTR=1 CFLAGS="-O2 -DHAS_LIBQRTR=1" LDFLAGS="-static -lqrtr" diag-router
+- peripheral.c: "set all F3 masks" (0x7d 0x05) passed a NULL range and crashed the router.
+- watch.c: a client write that got EAGAIN (unix SEQPACKET peer queue full, e.g. the modem's boot burst) stayed
+  pending forever; the client queue stalled and, through flow control, the router stopped reading the modem's
+  data channel. Requeue the message and retry once the socket is writable.
+- peripheral-qrtr.c: forward every non-HDLC frame of a QRTR packet (the modem packs several), 64 KiB receive
+  buffer, per-peripheral data counters every 10 s.
+- diag_cntl.c: feature mask as the downstream APPS diag (MASK_CENTRALIZATION, no MASTER_SETS_COMMON_MASK); with
+  DIAG ID support send masks, DIAGMODE and tx mode after the DIAG ID exchange, as downstream does; log range reports.
+- diag.c: line-buffered stdout for log files.
+
+diff --git a/router/diag.c b/router/diag.c
+index a65d348..b4284a8 100644
+--- a/router/diag.c
++++ b/router/diag.c
+@@ -139,6 +139,9 @@ int main(int argc, char **argv)
+ 	int ret;
+ 	int c;
+ 
++	/* line-buffered, so a log file shows the peripherals as they connect */
++	setvbuf(stdout, NULL, _IOLBF, 0);
++
+ 	for (;;) {
+ 		c = getopt(argc, argv, "hs:u:");
+ 		if (c < 0)
+diff --git a/router/diag_cntl.c b/router/diag_cntl.c
+index 7c94ac9..3e6097a 100644
+--- a/router/diag_cntl.c
++++ b/router/diag_cntl.c
+@@ -276,8 +276,9 @@ static int diag_cntl_feature_mask(struct peripheral *peripheral,
+ 	uint32_t local_mask = 0;
+ 	uint32_t mask = pkt->mask;
+ 
++	/* as the downstream (msm-4.14) APPS diag: no MASTER_SETS_COMMON_MASK, but MASK_CENTRALIZATION */
+ 	local_mask |= DIAG_FEATURE_FEATURE_MASK_SUPPORT;
+-	local_mask |= DIAG_FEATURE_DIAG_MASTER_SETS_COMMON_MASK;
++	local_mask |= DIAG_FEATURE_MASK_CENTRALIZATION;
+ 	if (peripheral->cmd_fd >= 0)
+ 		local_mask |= DIAG_FEATURE_REQ_RSP_SUPPORT;
+ 	local_mask |= DIAG_FEATURE_APPS_HDLC_ENCODE;
+@@ -514,7 +515,12 @@ static void diag_cntl_send_feature_mask(struct peripheral *peripheral, uint32_t
+ 	pkt->mask = mask;
+ 
+ 	queue_push(&peripheral->cntlq, pkt, len);
+-	/*send other control packets after sending feature mask */
++	/*
++	 * send other control packets after sending feature mask; with DIAG ID support they follow the
++	 * DIAG ID exchange instead (diag_cntl_process_diag_id), as downstream does
++	 */
++	if (mask & DIAG_FEATURE_DIAG_ID)
++		return;
+ 	diag_cntl_send_masks(peripheral);
+ 	diag_cntl_set_diag_mode(peripheral, true);
+ 	diag_cntl_set_buffering_mode(peripheral, 0);
+@@ -685,6 +691,13 @@ static int diag_cntl_process_diag_id(struct peripheral *peripheral, struct diag_
+ 	len = resp->hdr.len + sizeof(resp->hdr);
+ 
+ 	queue_push(&peripheral->cntlq, resp, len);
++	printf("[%s] diag id %u for %s; sending masks\n", peripheral->name, diag_id, process_name);
++
++	/* downstream sends the masks only after the DIAG ID exchange (diag_send_updates_peripheral) */
++	diag_cntl_send_masks(peripheral);
++	diag_cntl_send_event_mask(peripheral);
++	diag_cntl_set_diag_mode(peripheral, true);
++	diag_cntl_set_buffering_mode(peripheral, 0);
+ 	return 0;
+ }
+ 
+@@ -715,6 +728,12 @@ int diag_cntl_recv(struct peripheral *peripheral, const void *buf, size_t n)
+ 			break;
+ 		case DIAG_CNTL_CMD_NUM_PRESETS:
+ 			break;
++		case 22: /* LAST_EVENT_REPORT, sent with MASK_CENTRALIZATION */
++		case 23: /* LOG_RANGE_REPORT */
++		case 24: /* SSID_RANGE_REPORT */
++		case 25: /* BUILD_MASK_REPORT */
++			printf("[%s] control %d (range report, %u bytes)\n", peripheral->name, hdr->cmd, hdr->len);
++			break;
+ 		case DIAG_CNTL_CMD_DEREGISTER:
+ 			diag_cntl_deregister(peripheral, hdr, n);
+ 			break;
+diff --git a/router/peripheral-qrtr.c b/router/peripheral-qrtr.c
+index 9a3c59a..05715fb 100644
+--- a/router/peripheral-qrtr.c
++++ b/router/peripheral-qrtr.c
+@@ -63,6 +63,65 @@ enum {
+ 	DIAG_INSTANCE_DCI,
+ };
+ 
++/*
++ * A peripheral packs several non-HDLC frames (0x7e 0x01 len16 payload 0x7e) into one QRTR packet
++ * (downstream diag_add_hdlc_encoding() walks them all); forward every frame, not just the first.
++ */
++static unsigned long qrtr_stat_pkts[16], qrtr_stat_frames[16], qrtr_stat_bytes[16], qrtr_stat_bad[16];
++
++static int qrtr_perif_idx(struct peripheral *perif)
++{
++	struct list_head *item;
++	int i = 0;
++
++	list_for_each(item, &peripherals) {
++		if (container_of(item, struct peripheral, node) == perif)
++			return i & 15;
++		i++;
++	}
++	return 15;
++}
++
++static void qrtr_forward_frames(struct peripheral *perif, const uint8_t *p, size_t left,
++				struct watch_flow *flow)
++{
++	int idx = qrtr_perif_idx(perif);
++
++	qrtr_stat_pkts[idx]++;
++	qrtr_stat_bytes[idx] += left;
++	while (left >= 5) {
++		size_t len = p[2] | p[3] << 8;
++
++		if (p[0] != 0x7e || p[1] != 1 || 4 + len + 1 > left || p[4 + len] != 0x7e) {
++			qrtr_stat_bad[idx]++;
++			if (qrtr_stat_bad[idx] <= 5)
++				fprintf(stderr, "[%s] bad non-HDLC frame at %zu bytes left: %02x %02x len %zu\n",
++					perif->name, left, p[0], p[1], len);
++			break;
++		}
++		dm_broadcast(p + 4, len, flow);
++		qrtr_stat_frames[idx]++;
++		p += 4 + len + 1;
++		left -= 4 + len + 1;
++	}
++}
++
++static void qrtr_stats(void *data)
++{
++	struct list_head *item;
++	int i = 0;
++
++	list_for_each(item, &peripherals) {
++		struct peripheral *perif = container_of(item, struct peripheral, node);
++
++		if (qrtr_stat_pkts[i & 15])
++			printf("[%s] data: %lu pkts %lu frames %lu bytes %lu bad\n", perif->name,
++			       qrtr_stat_pkts[i & 15], qrtr_stat_frames[i & 15], qrtr_stat_bytes[i & 15],
++			       qrtr_stat_bad[i & 15]);
++		i++;
++	}
++}
++
+ static int qrtr_cntl_recv(int fd, void *data)
+ {
+ 	struct peripheral *perif = data;
+@@ -122,7 +181,6 @@ struct non_hdlc_pkt {
+ static int qrtr_cmd_recv(int fd, void *data)
+ {
+ 	struct peripheral *perif = data;
+-	struct non_hdlc_pkt *frame;
+ 	struct sockaddr_qrtr cmdsq;
+ 	struct sockaddr_qrtr sq;
+ 	struct qrtr_packet pkt;
+@@ -150,23 +208,7 @@ static int qrtr_cmd_recv(int fd, void *data)
+ 	case QRTR_TYPE_DEL_CLIENT:
+ 		break;
+ 	case QRTR_TYPE_DATA:
+-		frame = pkt.data;
+-		if (frame->start != 0x7e || frame->version != 1) {
+-			fprintf(stderr, "invalid non-HDLC frame\n");
+-			break;
+-		}
+-
+-		if (sizeof(*frame) + frame->length + 1 > pkt.data_len) {
+-			fprintf(stderr, "truncated non-HDLC frame\n");
+-			break;
+-		}
+-
+-		if (frame->payload[frame->length] != 0x7e) {
+-			fprintf(stderr, "non-HDLC frame is not truncated\n");
+-			break;
+-		}
+-
+-		dm_broadcast(frame->payload, frame->length, NULL);
++		qrtr_forward_frames(perif, pkt.data, pkt.data_len, NULL);
+ 		break;
+ 	case QRTR_TYPE_NEW_SERVER:
+ 		if (pkt.node == 0 && pkt.port == 0)
+@@ -199,11 +241,10 @@ static int qrtr_data_recv(int fd, void *data)
+ 	struct peripheral *perif = data;
+ 	struct sockaddr_qrtr sq;
+ 	struct qrtr_packet pkt;
+-        socklen_t sl;
+-	uint8_t buf[4096];
++	socklen_t sl;
++	static uint8_t buf[65536];
+ 	ssize_t n;
+ 	int ret;
+-	struct non_hdlc_pkt *frame;
+ 
+ 	sl = sizeof(sq);
+ 	n = recvfrom(fd, buf, sizeof(buf), 0, (void *)&sq, &sl);
+@@ -216,7 +257,7 @@ static int qrtr_data_recv(int fd, void *data)
+ 
+ 	ret = qrtr_decode(&pkt, buf, n, &sq);
+ 	if (ret < 0) {
+-		fprintf(stderr, "[PD-MAPPER] unable to decode qrtr packet\n");
++		fprintf(stderr, "[DIAG-QRTR] unable to decode qrtr packet\n");
+ 		return ret;
+ 	}
+ 
+@@ -228,27 +269,14 @@ static int qrtr_data_recv(int fd, void *data)
+ 			connect(perif->data_fd, (struct sockaddr *)&sq, sizeof(sq));
+ 			perif->data_open = true;
+ 			watch_add_writeq(perif->data_fd, &perif->dataq);
++			printf("[%s] data channel up (%d:%d)\n", perif->name, sq.sq_node, sq.sq_port);
+ 		}
+-		frame = pkt.data;
+-		if (frame->start != 0x7e || frame->version != 1) {
+-			fprintf(stderr, "invalid non-HDLC frame\n");
+-			break;
+-		}
+-
+-		if (sizeof(*frame) + frame->length + 1 > pkt.data_len) {
+-			fprintf(stderr, "truncated non-HDLC frame\n");
+-			break;
+-		}
+-
+-		if (frame->payload[frame->length] != 0x7e) {
+-			fprintf(stderr, "non-HDLC frame is not truncated\n");
+-			break;
+-		}
+-		dm_broadcast(frame->payload, frame->length, perif->flow);
++		qrtr_forward_frames(perif, pkt.data, pkt.data_len, perif->flow);
+ 		break;
+ 	case QRTR_TYPE_BYE:
+ 		watch_remove_writeq(perif->data_fd);
+ 		perif->data_open = false;
++		printf("[%s] data channel BYE\n", perif->name);
+ 		break;
+ 	default:
+ 		fprintf(stderr, "Unhandled DIAG DATA message from %d:%d (%d)\n",
+@@ -336,5 +364,7 @@ int peripheral_qrtr_init(void)
+ 	qrtr_perif_init_subsystem("wdsp", DIAG_INSTANCE_BASE_WDSP);
+ 	qrtr_perif_init_subsystem("soccp", DIAG_INSTANCE_BASE_SOCCP);
+ 
++	watch_add_timer(qrtr_stats, NULL, 10000, true);
++
+ 	return 0;
+ }
+diff --git a/router/peripheral.c b/router/peripheral.c
+index 1b63a58..7ece8f5 100644
+--- a/router/peripheral.c
++++ b/router/peripheral.c
+@@ -101,6 +101,10 @@ void peripheral_broadcast_msg_mask(struct diag_ssid_range_t *range)
+ 	list_for_each(item, &peripherals) {
+ 		peripheral = container_of(item, struct peripheral, node);
+ 
+-		diag_cntl_send_msg_mask(peripheral, range);
++		/* "set all" passes no range: send every range (a NULL range crashed the router) */
++		if (range)
++			diag_cntl_send_msg_mask(peripheral, range);
++		else
++			diag_cntl_send_masks(peripheral);
+ 	}
+ }
+diff --git a/router/watch.c b/router/watch.c
+index 21ea4c4..5e5ad8d 100644
+--- a/router/watch.c
++++ b/router/watch.c
+@@ -69,6 +69,8 @@ struct watch {
+ 	struct mbuf *pending_aio;
+ 
+ 	bool is_write;
++	/* a write got EAGAIN: its mbuf is back at the queue head, wait for the fd to be writable */
++	bool wait_writable;
+ 
+ 	struct watch_flow *flow;
+ 
+@@ -403,8 +405,25 @@ static void watch_handle_eventfd(int evfd, aio_context_t ioctx)
+ 			if (iocb->aio_fildes == w->fd) {
+ 				assert(w->pending_aio);
+ 
+-				if (ev[i].res == -EAGAIN)
++				if (ev[i].res == -EAGAIN) {
++					/*
++					 * Non-blocking client socket full (a unix SEQPACKET peer queues only
++					 * net.unix.max_dgram_qlen messages): requeue the mbuf at the head and
++					 * retry once the fd is writable. Leaving it pending stalled this queue
++					 * for good, and through the flow control the peripheral's data too.
++					 */
++					if (w->is_write) {
++						struct mbuf *m = w->pending_aio;
++
++						m->node.next = w->queue->next;
++						m->node.prev = w->queue;
++						w->queue->next->prev = &m->node;
++						w->queue->next = &m->node;
++						w->pending_aio = NULL;
++						w->wait_writable = true;
++					}
+ 					continue;
++				}
+ 
+ 				if (!w->is_write && ev[i].res >= 0)
+ 					w->pending_aio->offset = ev[i].res;
+@@ -428,6 +447,7 @@ void watch_run(void)
+ 	struct watch *next;
+ 	struct watch *w;
+ 	fd_set rfds;
++	fd_set wfds;
+ 	int evfd;
+ 	int nfds;
+ 	int ret;
+@@ -442,6 +462,7 @@ void watch_run(void)
+ 
+ 	while (!do_watch_quit) {
+ 		FD_ZERO(&rfds);
++		FD_ZERO(&wfds);
+ 		FD_SET(evfd, &rfds);
+ 
+ 		nfds = evfd + 1;
+@@ -457,6 +478,11 @@ void watch_run(void)
+ 		}
+ 
+ 		list_for_each_entry(w, &aio_watches, node) {
++			if (w->wait_writable) {
++				FD_SET(w->fd, &wfds);
++				nfds = MAX(w->fd + 1, nfds);
++				continue;
++			}
+ 			/* Submit AIO if none is pending */
+ 			if (!list_empty(w->queue) && !w->pending_aio)
+ 				watch_submit_aio(ioctx, evfd, w);
+@@ -475,7 +501,7 @@ void watch_run(void)
+ 			timeout = NULL;
+ 		}
+ 
+-		ret = select(nfds, &rfds, NULL, NULL, timeout);
++		ret = select(nfds, &rfds, &wfds, NULL, timeout);
+ 		if (ret < 0) {
+ 			warn("failed to select");
+ 			break;
+@@ -490,6 +516,13 @@ void watch_run(void)
+ 				watch_free_timer(timer);
+ 		}
+ 
++		if (ret > 0) {
++			list_for_each_entry(w, &aio_watches, node) {
++				if (w->wait_writable && FD_ISSET(w->fd, &wfds))
++					w->wait_writable = false;
++			}
++		}
++
+ 		if (FD_ISSET(evfd, &rfds))
+ 			watch_handle_eventfd(evfd, ioctx);
+ 
