@@ -11,7 +11,7 @@
 #   duo-modules-<release>.tar.zst kernel modules (/usr/lib/modules + the Duo's /usr/lib/duo set), unpacked over the root
 #   Image.gz, sm8150-microsoft-surface-duo.dtb, config-<release>, SHA256SUMS
 set -euo pipefail
-REPO=$(readlink -f "$1"); OUT=$(readlink -f "$2"); REF=${3:-default}
+REPO=$(readlink -f "$1"); OUT=$(readlink -m "$2"); REF=${3:-default}
 export LINUX_GIT=${LINUX_GIT:-/root/linux} BASE=${BASE:-v7.3.5}
 L=$REPO/tools/linux; KO=/root/build-duo; W=/root/duo-work
 mkdir -p "$OUT" "$W"

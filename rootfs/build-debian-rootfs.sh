@@ -21,7 +21,8 @@
 #   6. packs everything into a .tar.zst that goes to userdata:/debian on the phone (see docs/INSTALL.pl.md)
 # No firmware is included: the Duo's own partitions supply it at boot (duo-hw, the initramfs).
 set -euo pipefail
-REPO=$(readlink -f "$1"); OUT=$(readlink -f "$2"); KOUT=${3:+$(readlink -f "$3")}
+mkdir -p "$(dirname "$(readlink -m "$2")")"
+REPO=$(readlink -f "$1"); OUT=$(readlink -m "$2"); KOUT=${3:+$(readlink -f "$3")}
 MIRROR=${MIRROR:-http://deb.debian.org/debian}; W=${WORK:-/var/tmp/duo-rootfs}; R=$W/root
 L=$REPO/tools/linux
 [ -d "$L/system" ] && [ -n "$OUT" ] || { sed -n '2,21p' "$0"; exit 1; }
