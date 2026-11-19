@@ -114,7 +114,14 @@ i już ich nie powtarza, więc przetwornik DAC wzmacniacza zostaje wyłączony (
 Na 6.19 (linuxduobench) działało tylko dzięki innej kolejności ładowania.
 
 Poprawka: patch `0073` dodaje do `audio-routing` trasę `"SpkrLeft IN", "SPK1 OUT"` (jak na db845c). Wtedy
-wzmacniacz włącza się razem z odtwarzaniem, gdy jest już wybudzony.
+wzmacniacz włącza się razem z odtwarzaniem, gdy jest już wybudzony. Te same dwa błędy -16 zostają przy starcie, ale
+to już tylko odczyty stanu przy tworzeniu karty: przy graniu 0x311c = 0xc2.
+
+Głośność: sekwencja włączenia wzmacniacza w jądrze ustawiała przy każdym starcie dźwięku +12 dB, więc ustawione
+w UCM `PA Volume` 12 (+18 dB) działało tylko do pierwszego zamknięcia PCM. Patch `0074` pamięta to ustawienie.
+Tor jest czysty do ok. +20 dB w `RX7 Digital Volume` (zmierzone mikrofonem telefonu, tonem -3 dBFS), wyżej trzeszczy.
+Tryb DRE wzmacniacza (jak w sterowniku Androida, parametr `snd_soc_wsa881x.dre=1`) jest o ok. 4,5 dB cichszy, więc
+domyślnie jest wyłączony. Duo 1 ma jeden głośnik do mediów (lewa połowa) i słuchawkę do rozmów (prawa).
 
 Nie przeładowuj modułu karty (`modprobe -r snd_soc_sdm845`) jako obejścia: psuje port AFE w DSP
 (`SLIMBUS_0_RX` start -22) aż do restartu telefonu. Nie czytaj też `/sys/kernel/debug/soundwire/*/registers` ani
