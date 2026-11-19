@@ -56,6 +56,8 @@ if ! ipa_bound; then
 fi
 command -v qmicli > /dev/null && (
 	for i in $(seq 1 30); do timeout 10 qmicli -d qrtr://0 --dms-set-operating-mode=low-power > /dev/null 2>&1 && break; sleep 2; done
+	# LTE only before ModemManager: the 2G/3G scan with a SIM crashes the modem (QLink); see duo-modem-lowpower
+	[ -e /etc/duo/modem-all-rats ] || timeout 10 qmicli -d qrtr://0 --nas-set-system-selection-preference=lte > /dev/null 2>&1
 	for i in $(seq 1 12); do service modemmanager status > /dev/null 2>&1 && break; service modemmanager start > /dev/null 2>&1; sleep 5; done
 	sleep 3; mmcli -S > /dev/null 2>&1
 ) > /dev/null 2>&1 &

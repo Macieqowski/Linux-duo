@@ -6,18 +6,26 @@
 # and with it Wi-Fi, whose firmware runs on the modem DSP (2026-11-08, first boot with a SIM inserted: ModemManager
 # was D-Bus-activated at 27 s, enabled the radio at 49 s, modem crash at 50 s). From low-power, online works
 # (docs/research/workbench/modem.md, 2026-11-05). Never blocks ModemManager for long: gives up after ~90 s.
+# With a SIM, online + the default LTE/UMTS/GSM scan still trips the QLink assertion; LTE only registers fine
+# (2026-11-19, Play 260/06, stable). The setting does not persist (rmtfs -r), so it is set here before every
+# ModemManager start. /etc/duo/modem-all-rats skips it (2G/3G scan = modem crash on this kernel).
 log() { echo "duo-modem-lowpower: $*"; echo "duo-modem-lowpower: $*" > /dev/kmsg 2>/dev/null; }
 command -v qmicli > /dev/null || { log "no qmicli"; exit 0; }
 M=""; for r in /sys/class/remoteproc/remoteproc*; do [ "$(cat $r/name 2>/dev/null)" = modem ] && M=$r; done
 [ -n "$M" ] || { log "no modem remoteproc"; exit 0; }
 for i in $(seq 1 60); do [ "$(cat $M/state)" = running ] && break; sleep 1; done
 [ "$(cat $M/state)" = running ] || { log "modem DSP not running ($(cat $M/state))"; exit 0; }
+lte_only() {
+	[ -e /etc/duo/modem-all-rats ] && return 0
+	timeout 8 qmicli -d qrtr://0 --nas-set-system-selection-preference=lte > /dev/null 2>&1 &&
+		log "LTE only" || log "could not set LTE only"
+}
 for i in $(seq 1 15); do
 	m=$(timeout 8 qmicli -d qrtr://0 --dms-get-operating-mode 2>/dev/null | sed -n "s/.*Mode: '\(.*\)'.*/\1/p")
 	case "$m" in
-	low-power|online) log "operating mode already $m"; exit 0;;
+	low-power|online) log "operating mode already $m"; lte_only; exit 0;;
 	"") ;;   # QMI not answering yet
-	*) timeout 8 qmicli -d qrtr://0 --dms-set-operating-mode=low-power > /dev/null 2>&1 && { log "low-power set (was $m)"; exit 0; };;
+	*) timeout 8 qmicli -d qrtr://0 --dms-set-operating-mode=low-power > /dev/null 2>&1 && { log "low-power set (was $m)"; lte_only; exit 0; };;
 	esac
 	sleep 2
 done
