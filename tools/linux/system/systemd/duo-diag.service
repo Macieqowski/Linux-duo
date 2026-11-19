@@ -1,0 +1,17 @@
+# Test only: capture the modem's DIAG stream (F3 messages + events) from before the modem starts
+# (tools/linux/modem/duo-diag-start, duo-diag-cap.c; diag-router from linux-msm/diag). Off by default.
+[Unit]
+Description=Duo modem DIAG capture (test)
+DefaultDependencies=no
+After=local-fs.target
+Before=duo-modem.service ModemManager.service
+
+[Service]
+ExecStart=/usr/local/sbin/duo-diag-start
+# hold duo-modem until the client is connected and the masks are set
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 100); do grep -q connected /run/duo-diag/cap.txt 2>/dev/null && exit 0; sleep 0.1; done; exit 0'
+KillMode=control-group
+Restart=no
+
+[Install]
+WantedBy=sysinit.target

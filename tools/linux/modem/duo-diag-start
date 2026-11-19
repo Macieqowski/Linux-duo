@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Test only: run linux-msm diag-router + duo-diag-cap from boot, before the modem starts, so the DIAG capture
+# covers the modem's boot and its first network search (where the QLink assertion hits). One directory per boot:
+# /var/log/duo-diag/<date-time>/{router.txt,cap.qmdl,cap.txt,stats.txt}; /run/duo-diag points at the current one.
+# Extra duo-diag-cap options (e.g. -m 0xffffffff, -l 0xb) can go in /etc/duo/diag-cap.args.
+D=/var/log/duo-diag/$(date +%Y%m%d-%H%M%S)
+mkdir -p "$D" && ln -sfn "$D" /run/duo-diag
+/usr/local/bin/diag-router > "$D/router.txt" 2>&1 &
+ARGS=$(cat /etc/duo/diag-cap.args 2>/dev/null)
+exec /usr/local/bin/duo-diag-cap $ARGS "$D/cap.qmdl" > "$D/cap.txt" 2> "$D/stats.txt"
