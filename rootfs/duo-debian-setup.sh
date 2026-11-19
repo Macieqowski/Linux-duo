@@ -39,13 +39,17 @@ mkdir -p /etc/sddm.conf.d
 printf '[Autologin]\nUser=user\nSession=%s\n\n[General]\nDisplayServer=wayland\n' "$S" > /etc/sddm.conf.d/10-duo-autologin.conf
 echo duo-debian > /etc/hostname
 
-# Bluetooth firmware: ONLY qca/crbtfw21.tlv + crnv21.bin out of firmware-atheros - the whole package also brings the
-# generic ath10k WCN3990 board-2.bin that crashes the Duo's Wi-Fi (WCSS), so it is never installed (linuxduobench)
-if [ ! -f /lib/firmware/qca/crbtfw21.tlv ]; then
+# Bluetooth + Wi-Fi firmware out of firmware-atheros: ONLY qca/crbtfw21.tlv + crnv21.bin (Bluetooth) and the WCN3990
+# firmware-5.bin (Wi-Fi; without it ath10k never probes and the WLAN process inside the modem takes the whole modem
+# down, so no SIM either - 2026-11-19). The package's generic ath10k WCN3990 board-2.bin is never installed: it
+# overrides the Duo's own calibration (board.bin from modem_a) and crashes WCSS (linuxduobench)
+W=/lib/firmware/ath10k/WCN3990/hw1.0
+if [ ! -e /lib/firmware/qca/crbtfw21.tlv ] && [ ! -e /lib/firmware/qca/crbtfw21.tlv.zst ] || ! ls $W/firmware-5.bin* > /dev/null 2>&1; then
   (cd /tmp && rm -rf fwa && mkdir fwa && cd fwa && apt-get -q download firmware-atheros > /dev/null 2>&1 &&
-   dpkg-deb -x firmware-atheros_*.deb x && mkdir -p /lib/firmware/qca &&
+   dpkg-deb -x firmware-atheros_*.deb x && mkdir -p /lib/firmware/qca $W &&
    cp x/usr/lib/firmware/qca/crbtfw21.tlv* x/usr/lib/firmware/qca/crnv21.bin* /lib/firmware/qca/ &&
-   echo "bluetooth firmware: crbtfw21 + crnv21")
+   cp x/usr/lib/firmware/ath10k/WCN3990/hw1.0/firmware-5.bin* $W/ &&
+   echo "bluetooth + wifi firmware: crbtfw21, crnv21, WCN3990 firmware-5.bin") || echo "WARNING: firmware-atheros extract failed"
   rm -rf /tmp/fwa
 fi
 
