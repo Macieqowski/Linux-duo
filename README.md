@@ -127,6 +127,14 @@ Nie przeładowuj modułu karty (`modprobe -r snd_soc_sdm845`) jako obejścia: ps
 (`SLIMBUS_0_RX` start -22) aż do restartu telefonu. Nie czytaj też `/sys/kernel/debug/soundwire/*/registers` ani
 zbiorczo `/sys/kernel/debug/regmap/*/registers`: odczyt rejestrów kontrolera zegarów zresetował telefon.
 
+## Wibracje: reset telefonu przy „sile wibracji”
+
+Sterownik `da7280` (także w czystym 7.3.5) zgłasza obsługę `FF_GAIN`, ale nie ma funkcji `set_gain`. Jądro wywołuje
+ją bez sprawdzenia, więc jedno zdarzenie `EV_FF`/`FF_GAIN` z przestrzeni użytkownika (np. `fftest`, gry, demony
+haptyki) to wywołanie pustego wskaźnika: Duo od razu resetuje się do bootloadera, bez śladu w pstore. Zwykłe efekty
+bez `FF_GAIN` (np. `FF_RUMBLE`, którego używa `hfd-service`) działają. Patch `0075` przestaje zgłaszać `FF_GAIN`, więc
+jądro takie zdarzenie ignoruje. Test na telefonie: w toku.
+
 ## Budowanie
 
 Najprościej w GitHub Actions: **Actions → build → Run workflow**. Powstają artefakty:

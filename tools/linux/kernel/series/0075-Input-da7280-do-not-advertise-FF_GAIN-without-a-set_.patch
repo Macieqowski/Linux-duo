@@ -1,0 +1,41 @@
+From c2d5a147acee8398bc656d543766314b093d693f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 21:17:38 +0000
+Subject: [PATCH] Input: da7280 - do not advertise FF_GAIN without a set_gain
+ callback
+
+The driver sets the FF_GAIN capability but never installs ff->set_gain.
+ff-core calls ff->set_gain() unconditionally for an advertised FF_GAIN,
+so a single EV_FF/FF_GAIN event written by userspace (fftest, games,
+haptics daemons) is a NULL pointer call. On the Surface Duo it reset the
+phone straight into the bootloader.
+
+Drop the capability: ff-core then ignores FF_GAIN events. Effects keep
+their own level (FF_CONSTANT level, FF_RUMBLE magnitudes).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EJcJH42jMtxxhTuvKvyeRV
+---
+ drivers/input/misc/da7280.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/input/misc/da7280.c b/drivers/input/misc/da7280.c
+index 881120f6a..d64a9685f 100644
+--- a/drivers/input/misc/da7280.c
++++ b/drivers/input/misc/da7280.c
+@@ -1243,7 +1243,11 @@ static int da7280_probe(struct i2c_client *client)
+ 	input_set_capability(haptics->input_dev, EV_FF, FF_CUSTOM);
+ 	input_set_capability(haptics->input_dev, EV_FF, FF_RUMBLE);
+ 	input_set_capability(haptics->input_dev, EV_FF, FF_CONSTANT);
+-	input_set_capability(haptics->input_dev, EV_FF, FF_GAIN);
++	/*
++	 * No FF_GAIN: the driver has no ff->set_gain, and ff-core calls it unconditionally for an
++	 * advertised FF_GAIN, so a single EV_FF/FF_GAIN write from userspace was a NULL pointer call
++	 * (on the Surface Duo it hard-reset the phone).
++	 */
+ 
+ 	error = input_ff_create(haptics->input_dev,
+ 				DA7280_FF_EFFECT_COUNT_MAX);
+-- 
+2.43.0
+
