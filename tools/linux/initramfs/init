@@ -67,7 +67,8 @@ if [ -n "$DR" ]; then
   fi
   # USB gadget (ACM + NCM) + the PC link addresses, as in the RAM workbench; the installed system's sshd serves them
   G=/sys/kernel/config/usb_gadget/duo; mkdir -p $G; ( cd $G
-    echo 0x18d1 > idVendor; echo 0x4ee7 > idProduct
+    echo 0x1d6b > idVendor; echo 0x0104 > idProduct   # Linux Foundation multifunction composite: Windows 11 binds its own NCM and serial drivers
+    echo 0xEF > bDeviceClass; echo 0x02 > bDeviceSubClass; echo 0x01 > bDeviceProtocol   # IAD composite
     mkdir -p strings/0x409 configs/c.1/strings/0x409 functions/acm.usb0 functions/ncm.usb0
     echo "Surface Duo mainline" > strings/0x409/product; echo "duo-linux" > strings/0x409/serialnumber
     echo "acm+ncm" > configs/c.1/strings/0x409/configuration
@@ -213,7 +214,8 @@ fi
 (
 G=/sys/kernel/config/usb_gadget/duo
 mkdir -p $G; cd $G
-echo 0x18d1 > idVendor; echo 0x4ee7 > idProduct
+echo 0x1d6b > idVendor; echo 0x0104 > idProduct   # Linux Foundation multifunction composite: Windows 11 binds its own NCM and serial drivers
+echo 0xEF > bDeviceClass; echo 0x02 > bDeviceSubClass; echo 0x01 > bDeviceProtocol   # IAD composite
 mkdir -p strings/0x409 configs/c.1/strings/0x409 functions/acm.usb0 functions/ncm.usb0
 echo "Surface Duo mainline" > strings/0x409/product; echo "duo-linux" > strings/0x409/serialnumber
 echo "acm+ncm" > configs/c.1/strings/0x409/configuration

@@ -1,0 +1,74 @@
+From 0b607955f2fa2362853f64e5c9be5393b58edcc6 Mon Sep 17 00:00:00 2001
+From: Linux-duo <duo@localhost>
+Date: Thu, 19 Nov 2026 09:37:09 +0000
+Subject: [PATCH] soc: qcom: rpmh: skip resource reads on SM8150's apps RSC
+
+The SM8150 apps RSC never completes a read request. Since v7.x
+qcom-rpmh-regulator reads the regulator state at probe; the TCS then stays
+busy, every later RPMh request times out (-110), and the boot hangs at the
+first interconnect vote (mdss runtime resume). Mark the RSC with
+qcom,no-resource-read and make rpmh_read() return -EOPNOTSUPP for it.
+
+Also drop platforms and features the Duo does not use from duo.config.
+---
+ arch/arm64/boot/dts/qcom/sm8150.dtsi |  1 +
+ arch/arm64/configs/duo.config        | 12 ++++++++++++
+ drivers/soc/qcom/rpmh.c              |  8 ++++++++
+ 3 files changed, 21 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150.dtsi b/arch/arm64/boot/dts/qcom/sm8150.dtsi
+index 94a3b02cb..24d4aeac6 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8150.dtsi
+@@ -4481,6 +4481,7 @@ apps_rsc: rsc@18200000 {
+ 				     <GIC_SPI 5 IRQ_TYPE_LEVEL_HIGH>;
+ 			qcom,tcs-offset = <0xd00>;
+ 			qcom,drv-id = <2>;
++			qcom,no-resource-read;
+ 			qcom,tcs-config = <ACTIVE_TCS  2>,
+ 					  <SLEEP_TCS   3>,
+ 					  <WAKE_TCS    3>,
+diff --git a/arch/arm64/configs/duo.config b/arch/arm64/configs/duo.config
+index f08320a99..4b6df552b 100644
+--- a/arch/arm64/configs/duo.config
++++ b/arch/arm64/configs/duo.config
+@@ -516,3 +516,15 @@ CONFIG_NETFILTER_XT_MATCH_OWNER=y
+ 
+ # v7.3 port: the iris driver would claim the venus compatibles and hide the SM8150 entry
+ # CONFIG_VIDEO_QCOM_IRIS is not set
++# not needed on the Duo: keeps the kernel image smaller
++# CONFIG_ARCH_ASPEED is not set
++# CONFIG_ARCH_BCM is not set
++# CONFIG_ARCH_NXP is not set
++# CONFIG_XEN is not set
++# CONFIG_VIRTUALIZATION is not set
++# CONFIG_KVM is not set
++# CONFIG_HIBERNATION is not set
++# CONFIG_KEXEC is not set
++# CONFIG_KEXEC_FILE is not set
++# CONFIG_CRASH_DUMP is not set
++# CONFIG_NUMA is not set
+diff --git a/drivers/soc/qcom/rpmh.c b/drivers/soc/qcom/rpmh.c
+index f881c4c75..8f7d4531b 100644
+--- a/drivers/soc/qcom/rpmh.c
++++ b/drivers/soc/qcom/rpmh.c
+@@ -230,8 +230,16 @@ int rpmh_read(const struct device *dev, struct tcs_cmd *cmd)
+ {
+ 	DECLARE_COMPLETION_ONSTACK(compl);
+ 	DEFINE_RPMH_MSG_ONSTACK(dev, RPMH_ACTIVE_ONLY_STATE, &compl, rpm_msg);
++	struct rsc_drv *drv = ctrlr_to_drv(get_rpmh_ctrlr(dev));
+ 	int ret;
+ 
++	/*
++	 * Some RSCs (SM8150) never complete a read request: the TCS then stays
++	 * busy and every later RPMh request times out as well.
++	 */
++	if (of_property_read_bool(drv->dev->of_node, "qcom,no-resource-read"))
++		return -EOPNOTSUPP;
++
+ 	ret = __fill_rpmh_msg(&rpm_msg, RPMH_ACTIVE_ONLY_STATE, cmd, 1, true);
+ 	if (ret)
+ 		return ret;
+-- 
+2.43.0
+
