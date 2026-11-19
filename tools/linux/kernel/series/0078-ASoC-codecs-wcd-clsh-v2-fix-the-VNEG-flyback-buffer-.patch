@@ -1,0 +1,33 @@
+From cf3ac2281cb69f5bb395b972db93f4c51830ca27 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 21:55:43 +0000
+Subject: [PATCH] ASoC: codecs: wcd-clsh-v2: fix the VNEG flyback buffer
+ current value
+
+wcd_clsh_set_flyback_current() updates the VNEG field (bits 7:4) of
+RX_BIAS_FLYB_BUFF with the value 0x0A, which the mask turns into 0 and
+so switches the VNEG buffer bias current off. The vendor driver writes
+0xA0 to that field (and leaves the reset value 0xAA alone on WCD934x).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EJcJH42jMtxxhTuvKvyeRV
+---
+ sound/soc/codecs/wcd-clsh-v2.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sound/soc/codecs/wcd-clsh-v2.c b/sound/soc/codecs/wcd-clsh-v2.c
+index 62ca22ea0..d072de704 100644
+--- a/sound/soc/codecs/wcd-clsh-v2.c
++++ b/sound/soc/codecs/wcd-clsh-v2.c
+@@ -364,7 +364,7 @@ static void wcd_clsh_set_flyback_current(struct snd_soc_component *comp,
+ 	snd_soc_component_update_bits(comp, WCD9XXX_RX_BIAS_FLYB_BUFF,
+ 				WCD9XXX_RX_BIAS_FLYB_VPOS_5_UA_MASK, 0x0A);
+ 	snd_soc_component_update_bits(comp, WCD9XXX_RX_BIAS_FLYB_BUFF,
+-				WCD9XXX_RX_BIAS_FLYB_VNEG_5_UA_MASK, 0x0A);
++				WCD9XXX_RX_BIAS_FLYB_VNEG_5_UA_MASK, 0xA0);
+ 	/* Sleep needed to avoid click and pop as per HW requirement */
+ 	usleep_range(100, 110);
+ }
+-- 
+2.43.0
+

@@ -1,0 +1,106 @@
+From d6be94a23530d6ad2d237a26f449aafe8ba0c824 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 21:55:43 +0000
+Subject: [PATCH] ASoC: codecs: wcd934x: apply the vendor analog RX init values
+
+Apply the analog RX, class-H and clock entries of the vendor
+tavil_codec_reg_defaults, tavil_codec_reg_init_common_val and
+tavil_codec_reg_init_1_1_val tables (bandgap fine adjust, class-H decay
+and K2, OCP limits, MCLK config, TOP_CFG1, FS counter, RPM clock gate,
+HPH compander/HD2 on 1.1). The speaker (compander 7/8, boost), TX, MBHC
+and CPE entries are left out.
+
+Also make the read-only analog status registers (buck, OCP count, HPH,
+EAR, LINEOUT, PLL and SIDO ramp status) volatile, so that debugfs shows
+the hardware value instead of a stale cache entry.
+
+With this the WCD9340 analog and RX0 registers on the Surface Duo match
+what the Android driver programs while the earpiece (EAR) plays,
+compared register by register (0x0600-0x07ff, RX0, class-H).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EJcJH42jMtxxhTuvKvyeRV
+---
+ drivers/mfd/wcd934x.c                 | 10 ++++++++++
+ include/linux/mfd/wcd934x/registers.h |  8 ++++++++
+ sound/soc/codecs/wcd934x.c            | 23 +++++++++++++++++++++++
+ 3 files changed, 41 insertions(+)
+
+diff --git a/drivers/mfd/wcd934x.c b/drivers/mfd/wcd934x.c
+index d57796933..c02b1d644 100644
+--- a/drivers/mfd/wcd934x.c
++++ b/drivers/mfd/wcd934x.c
+@@ -92,6 +92,16 @@ static bool wcd934x_is_volatile_register(struct device *dev, unsigned int reg)
+ 	case WCD934X_ANA_MICB2:
+ 	case WCD934X_ANA_RCO:
+ 	case WCD934X_ANA_BIAS:
++	/* read-only analog status registers */
++	case WCD934X_ANA_BUCK_STATUS:
++	case WCD934X_RX_OCP_COUNT:
++	case WCD934X_HPH_L_STATUS:
++	case WCD934X_HPH_R_STATUS:
++	case WCD934X_EAR_STATUS_REG:
++	case WCD934X_DIFF_LO_LO1_STATUS_1:
++	case WCD934X_DIFF_LO_LO1_STATUS_2:
++	case WCD934X_CLK_SYS_PLL_STATUS:
++	case WCD934X_SIDO_NEW_INT_RAMP_STATUS:
+ 		return true;
+ 	default:
+ 		return false;
+diff --git a/include/linux/mfd/wcd934x/registers.h b/include/linux/mfd/wcd934x/registers.h
+index 76a943c83..98373df74 100644
+--- a/include/linux/mfd/wcd934x/registers.h
++++ b/include/linux/mfd/wcd934x/registers.h
+@@ -551,6 +551,14 @@
+ #define WCD934X_TEST_DEBUG_PAD_DRVCTL_0				0x803b
+ #define WCD934X_TEST_DEBUG_NPL_DLY_TEST_1			0x803e
+ 
++#define WCD934X_ANA_BUCK_STATUS					0x0607
++#define WCD934X_HPH_L_STATUS					0x06c9
++#define WCD934X_HPH_R_STATUS					0x06ca
++#define WCD934X_EAR_STATUS_REG					0x06e7
++#define WCD934X_DIFF_LO_LO1_STATUS_1				0x06f4
++#define WCD934X_DIFF_LO_LO1_STATUS_2				0x06f5
++#define WCD934X_CLK_SYS_PLL_STATUS				0x0710
++#define WCD934X_SIDO_NEW_INT_RAMP_STATUS			0x0796
+ #define WCD934X_MAX_REGISTER					0xffff
+ #define WCD934X_SEL_REGISTER					0x800
+ #define WCD934X_SEL_MASK					0xff
+diff --git a/sound/soc/codecs/wcd934x.c b/sound/soc/codecs/wcd934x.c
+index fa3f381f9..3fe277a25 100644
+--- a/sound/soc/codecs/wcd934x.c
++++ b/sound/soc/codecs/wcd934x.c
+@@ -2221,7 +2221,30 @@ static void wcd934x_rx_init(struct wcd934x_codec *wcd)
+ 	    wcd->version == WCD_VERSION_WCD9341_1_1) {
+ 		regmap_update_bits(rm, WCD934X_CDC_RX3_RX_PATH_SEC0, 0xFC, 0xF4);
+ 		regmap_update_bits(rm, WCD934X_CDC_RX4_RX_PATH_SEC0, 0xFC, 0xF4);
++		/* tavil_codec_reg_init_1_1_val, headphone part */
++		regmap_update_bits(rm, WCD934X_CDC_COMPANDER1_CTL7, 0x1E, 0x06);
++		regmap_update_bits(rm, WCD934X_CDC_COMPANDER2_CTL7, 0x1E, 0x06);
++		regmap_write(rm, WCD934X_HPH_NEW_INT_RDAC_HD2_CTL_L, 0x84);
++		regmap_write(rm, WCD934X_HPH_NEW_INT_RDAC_HD2_CTL_R, 0x84);
+ 	}
++
++	/*
++	 * Analog RX / class-H / clock values from tavil_codec_reg_defaults and
++	 * tavil_codec_reg_init_common_val (vendor audio-kernel); the speaker
++	 * (compander 7/8, boost), TX, MBHC and CPE entries are left out.
++	 */
++	regmap_write(rm, WCD934X_BIAS_VBG_FINE_ADJ, 0x75);
++	regmap_update_bits(rm, WCD934X_CDC_CLSH_DECAY_CTRL, 0x03, 0x00);
++	regmap_update_bits(rm, WCD934X_RX_OCP_CTL, 0x0F, 0x02);
++	regmap_write(rm, WCD934X_HPH_OCP_CTL, 0x3A);
++	regmap_update_bits(rm, WCD934X_HPH_L_TEST, 0x01, 0x01);
++	regmap_update_bits(rm, WCD934X_HPH_R_TEST, 0x01, 0x01);
++	regmap_update_bits(rm, WCD934X_CODEC_RPM_CLK_MCLK_CFG, 0x04, 0x04);
++	regmap_update_bits(rm, WCD934X_CDC_CLSH_K2_MSB, 0x0F, 0x00);
++	regmap_write(rm, WCD934X_CDC_CLSH_K2_LSB, 0x60);
++	regmap_update_bits(rm, WCD934X_CDC_TOP_TOP_CFG1, 0x03, 0x03);
++	regmap_update_bits(rm, WCD934X_CDC_CLK_RST_CTRL_FS_CNT_CONTROL, 0x01, 0x01);
++	regmap_update_bits(rm, WCD934X_CODEC_RPM_CLK_GATE, 0x08, 0x00);
+ }
+ 
+ static int wcd934x_comp_init(struct snd_soc_component *component)
+-- 
+2.43.0
+

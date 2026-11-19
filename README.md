@@ -24,6 +24,7 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | Dane komórkowe (LTE) | działa | modem + IPA v4.1 + ModemManager |
 | **Połączenia, SMS** | **częściowo** | na tym repo: SMS i połączenia (przez 2G) działają z [obejściem modemu](#modem-obejście-awarii-quick-offline), ale bez dźwięku rozmowy, dzwonka i wibracji. Do zrobienia |
 | Głośnik, mikrofony | działa | WCD9340 + WSA8815, strojenie z ACDB telefonu. Na 7.3.5 głośnik milczał: [naprawione trasą w DT](#głośnik-cisza-na-735) |
+| Słuchawka do rozmów | częściowo | wyjście EAR kodeka; gra po poprawkach `0076`–`0079`, [cichsza niż głośnik](#słuchawka-do-rozmów-wyjście-ear); głośność w rozmowie do sprawdzenia |
 | Czujniki, zawias, obrót | działa | SLPI + hexagonrpcd + libssc (budowane w obrazie) |
 | Aparat | częściowo | wymaga modułu imx351 zbudowanego z danych Twojego telefonu |
 | Ładowanie, bateria | działa | qcom_smbx (SMB5) + 2x bq27742 |
@@ -126,6 +127,31 @@ domyślnie jest wyłączony. Duo 1 ma jeden głośnik do mediów (lewa połowa) 
 Nie przeładowuj modułu karty (`modprobe -r snd_soc_sdm845`) jako obejścia: psuje port AFE w DSP
 (`SLIMBUS_0_RX` start -22) aż do restartu telefonu. Nie czytaj też `/sys/kernel/debug/soundwire/*/registers` ani
 zbiorczo `/sys/kernel/debug/regmap/*/registers`: odczyt rejestrów kontrolera zegarów zresetował telefon.
+
+## Słuchawka do rozmów (wyjście EAR)
+
+Słuchawka (górna krawędź prawej połowy) wisi na wyjściu EAR kodeka WCD9340, tak jak w Androidzie (ścieżka `handset`
+w `mixer_paths_tavil.xml`: `RX INT0_1 MIX1 INP0` = `RX0`, `RX INT0 DEM MUX` = `CLSH_DSM_OUT`, `EAR PA Gain` +6 dB,
+w jądrze głównym `EAR PA Volume` 4).
+
+- Gdy grała sama słuchawka, kodek nie miał zegara MCLK: w `dmesg` było `overflow error on RX port 0` i cisza. Grało
+  tylko wtedy, gdy zegar trzymał akurat tor głośnika. Patch `0076` dodaje trasę `"RX_BIAS", "MCLK"` (jak w DT
+  Microsoftu i na db845c). Zegar kodeka jest przez to włączony cały czas.
+- Patche `0077` i `0079` ustawiają przy starcie te same wartości, co sterownik Androida (`tavil_codec_reg_defaults`,
+  `tavil_codec_reg_init_common_val`, `tavil_codec_reg_init_1_1_val`). `0079` oznacza też rejestry stanu jako ulotne,
+  więc debugfs pokazuje ich prawdziwą wartość.
+- Patch `0078` poprawia błąd w `wcd-clsh-v2`: prąd bufora VNEG był zapisywany jako 0 zamiast 0xA0.
+
+Po tych zmianach 672 rejestry analogowe i toru RX0 w trakcie grania na słuchawce mają te same wartości, co ustawia
+Android. Sterownik kodeka w Androidzie Duo to standardowy kod Qualcomma (Microsoft zmienił tylko czas startu
+mikrofonu). Słuchawka gra czysto i liniowo do pełnej skali, ale przy tym samym sygnale jest o ok. 20 dB cichsza od
+głośnika (głośnik +18 dB, słuchawka +6 dB). W rozmowie Android dodaje jeszcze przetwarzanie mowy w DSP, więc
+docelową głośność trzeba ustawić na torze głosowym.
+
+Przy testach wyjść: nie zmieniaj tras `RX INTx_1 MIX1 INP0`, gdy strumień jest otwarty, bo tor milknie aż do
+ponownego otwarcia. Najpierw `pactl suspend-sink <sink> 1`, potem mikser, potem `pactl suspend-sink <sink> 0`.
+Wyjścia LINEOUT i HPH (Duo nie ma gniazda słuchawek) na razie kończą się błędem overflow. Po takiej próbie głośnik
+może milczeć mimo dobrego miksera: pomaga jeszcze jedno uśpienie i wybudzenie sinka.
 
 ## Wibracje: reset telefonu przy „sile wibracji”
 

@@ -1,0 +1,58 @@
+From 88f46e286cca465f553bd0a6ded2761c659c88e1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 21:31:24 +0000
+Subject: [PATCH] ASoC: codecs: wcd934x: clear RX_PATH_SEC0 bit 3 on the EAR
+ and LINEOUT interpolators
+
+The vendor driver writes RX0_RX_PATH_SEC0 bit 3 to 0 at init
+(tavil_codec_reg_defaults) and, on 1.1 silicon, RX3/RX4 SEC0 to 0xF4
+(tavil_codec_reg_init_1_1_val); mainline wcd9335 does the same for its
+EAR path. Mainline wcd934x leaves the reset value. Match the vendor
+init so the EAR and LINEOUT paths run with the same configuration as on
+Android.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EJcJH42jMtxxhTuvKvyeRV
+---
+ sound/soc/codecs/wcd934x.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/sound/soc/codecs/wcd934x.c b/sound/soc/codecs/wcd934x.c
+index b3f06bc51..fa3f381f9 100644
+--- a/sound/soc/codecs/wcd934x.c
++++ b/sound/soc/codecs/wcd934x.c
+@@ -2207,6 +2207,23 @@ static void wcd934x_hw_init(struct wcd934x_codec *wcd)
+ 	regmap_update_bits(rm, WCD934X_CPE_SS_DMIC_CFG, 0x80, 0x00);
+ }
+ 
++/*
++ * The vendor driver (tavil_codec_reg_defaults / tavil_codec_reg_init_1_1_val) clears bit 3 of RX_PATH_SEC0 on the
++ * EAR interpolator (RX0) and, on 1.1 silicon, on the LINEOUT ones (RX3/RX4); wcd9335 does the same for its EAR
++ * path. Match it so these paths run with the vendor configuration.
++ */
++static void wcd934x_rx_init(struct wcd934x_codec *wcd)
++{
++	struct regmap *rm = wcd->regmap;
++
++	regmap_update_bits(rm, WCD934X_CDC_RX0_RX_PATH_SEC0, 0x08, 0x00);
++	if (wcd->version == WCD_VERSION_WCD9340_1_1 ||
++	    wcd->version == WCD_VERSION_WCD9341_1_1) {
++		regmap_update_bits(rm, WCD934X_CDC_RX3_RX_PATH_SEC0, 0xFC, 0xF4);
++		regmap_update_bits(rm, WCD934X_CDC_RX4_RX_PATH_SEC0, 0xFC, 0xF4);
++	}
++}
++
+ static int wcd934x_comp_init(struct snd_soc_component *component)
+ {
+ 	struct wcd934x_codec *wcd = dev_get_drvdata(component->dev);
+@@ -2214,6 +2231,7 @@ static int wcd934x_comp_init(struct snd_soc_component *component)
+ 	wcd934x_hw_init(wcd);
+ 	wcd934x_enable_efuse_sensing(wcd);
+ 	wcd934x_get_version(wcd);
++	wcd934x_rx_init(wcd);
+ 
+ 	return 0;
+ }
+-- 
+2.43.0
+

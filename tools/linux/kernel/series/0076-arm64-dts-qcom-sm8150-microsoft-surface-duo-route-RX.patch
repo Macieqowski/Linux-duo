@@ -1,0 +1,43 @@
+From aae91fafa183b407d7c0707a1b57a12380b07046 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 21:22:08 +0000
+Subject: [PATCH] arm64: dts: qcom: sm8150-microsoft-surface-duo: route RX_BIAS
+ to MCLK
+
+With only the EAR (earpiece) path powered, nothing keeps the WCD9340
+master clock on: the output powers up with the codec clock off, SLIMbus
+logs "overflow error on RX port 0" and the earpiece stays silent. It only
+played while the speaker path happened to hold MCLK.
+
+Add the "RX_BIAS", "MCLK" route, as in Microsoft's Android DT and on the
+other WCD934x boards (db845c, beryllium). Verified on the Duo: the EAR
+output plays on its own and the overflow is gone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EJcJH42jMtxxhTuvKvyeRV
+---
+ .../boot/dts/qcom/sm8150-microsoft-surface-duo-mic.dtsi    | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-mic.dtsi b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-mic.dtsi
+index 64722493e..94ea3eeec 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-mic.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-mic.dtsi
+@@ -14,8 +14,13 @@
+ 	 * driver is a module) the amp is already runtime-suspended then (regmap cache-only): the Bandgap (0x3103) and
+ 	 * RDAC (0x311c) writes fail with -EBUSY, DAPM still marks them on and never writes them again -> silent speaker.
+ 	 * With the route the path powers with the stream, after ASoC has resumed the amp.
++	 *
++	 * RX_BIAS needs the codec MCLK, as in Microsoft's DT and on every other WCD934x board (db845c, beryllium):
++	 * without it the analog outputs (EAR earpiece, LINEOUT) power up with the codec clock off -> silent earpiece
++	 * and "overflow error on RX port 0" on SLIMbus.
+ 	 */
+-	audio-routing = "DMIC1", "MIC BIAS1",
++	audio-routing = "RX_BIAS", "MCLK",
++			"DMIC1", "MIC BIAS1",
+ 			"DMIC2", "MIC BIAS3",
+ 			"SpkrLeft IN", "SPK1 OUT";
+ 
+-- 
+2.43.0
+
