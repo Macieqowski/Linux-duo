@@ -23,7 +23,7 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | Wi-Fi, Bluetooth | działa | ath10k / hci_qca |
 | Dane komórkowe (LTE) | działa | modem + IPA v4.1 + ModemManager |
 | **Połączenia, SMS** | **częściowo** | na tym repo: SMS i połączenia (przez 2G) działają z [obejściem modemu](#modem-obejście-awarii-quick-offline), ale bez dźwięku rozmowy, dzwonka i wibracji. Do zrobienia |
-| Głośnik, mikrofony | działa | WCD9340 + WSA8815, strojenie z ACDB telefonu |
+| Głośnik, mikrofony | działa | WCD9340 + WSA8815, strojenie z ACDB telefonu. Na 7.3.5 głośnik milczał: [naprawione trasą w DT](#głośnik-cisza-na-735) |
 | Czujniki, zawias, obrót | działa | SLPI + hexagonrpcd + libssc (budowane w obrazie) |
 | Aparat | częściowo | wymaga modułu imx351 zbudowanego z danych Twojego telefonu |
 | Ładowanie, bateria | działa | qcom_smbx (SMB5) + 2x bq27742 |
@@ -100,6 +100,25 @@ telefonu (power + głośność w dół).
 **Cofnięcie:** `duo-efs-write rm /nv/item_files/modem/utils/mcpm/mcpm_quick_offline_cfg` i czysty restart modemu,
 albo usunięcie `/var/lib/duo-efs` (przy następnym starcie powstanie nowa kopia z partycji), albo
 `touch /etc/duo/efs-partitions` (stary tryb: partycje tylko do odczytu, zmiany EFS tylko w RAM do restartu).
+
+## Głośnik: cisza na 7.3.5
+
+Objaw: mikrofony działają, głośnik milczy, a przy starcie w `dmesg` są błędy
+`wsa881x ... ASoC error (-16)` dla rejestrów 0x311c (RDAC) i 0x3103 (Bandgap).
+
+Przyczyna: w węźle `sound` nie było trasy do wejścia wzmacniacza `SpkrLeft IN`. Ścieżka DAPM wzmacniacza
+(IN → RDAC → SPKR PGA → SPKR) nie ma wtedy podłączonego wejścia i jest włączana tylko raz, przy podłączeniu karty
+dźwiękowej. Sterownik karty (`snd_soc_sdm845`) jest modułem i ładuje się ok. 7 s po wzmacniaczu, który po 3 s
+usypia (runtime PM). Zapisy do uśpionego wzmacniacza kończą się błędem -EBUSY, DAPM i tak uznaje je za wykonane
+i już ich nie powtarza, więc przetwornik DAC wzmacniacza zostaje wyłączony (0x311c = 0x42 zamiast 0xc2).
+Na 6.19 (linuxduobench) działało tylko dzięki innej kolejności ładowania.
+
+Poprawka: patch `0073` dodaje do `audio-routing` trasę `"SpkrLeft IN", "SPK1 OUT"` (jak na db845c). Wtedy
+wzmacniacz włącza się razem z odtwarzaniem, gdy jest już wybudzony.
+
+Nie przeładowuj modułu karty (`modprobe -r snd_soc_sdm845`) jako obejścia: psuje port AFE w DSP
+(`SLIMBUS_0_RX` start -22) aż do restartu telefonu. Nie czytaj też `/sys/kernel/debug/soundwire/*/registers` ani
+zbiorczo `/sys/kernel/debug/regmap/*/registers`: odczyt rejestrów kontrolera zegarów zresetował telefon.
 
 ## Budowanie
 

@@ -1,0 +1,51 @@
+From 8114ed60193760ec4e5dc5b07ac08c7095e07e84 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 19:40:06 +0000
+Subject: [PATCH] arm64: dts: qcom: sm8150-microsoft-surface-duo: route SPK1
+ OUT to the WSA8815
+
+The speaker was silent on Debian with the v7.3 kernel. Without a route into
+"SpkrLeft IN", the amplifier's DAPM path (IN -> RDAC -> SPKR PGA -> SPKR) has
+an unconnected input. DAPM therefore powers it once, when the card binds,
+whether or not anything plays.
+
+The machine driver is a module, so the card binds about 7 s after the amp
+probed. By then the amp is runtime-suspended and its regmap is cache-only.
+The Bandgap (0x3103, volatile) and RDAC (0x311c, not cached yet) writes
+fail with -EBUSY ("ASoC error (-16)" at boot). DAPM still marks both widgets
+on and never writes them again, so SPKR_DAC_CTL stays at 0x42 (DAC off)
+during playback. The linuxduobench 6.19 boot happened to bind the card
+while the amp was awake: 0x311c = 0xc2 there.
+
+Route SPK1 OUT to SpkrLeft IN, as db845c does. The amp's path then powers
+with the playback stream, after ASoC has resumed the amp for the open
+backend.
+---
+ .../dts/qcom/sm8150-microsoft-surface-duo-mic.dtsi     | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-mic.dtsi b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-mic.dtsi
+index 7c17d79ed..64722493e 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-mic.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-mic.dtsi
+@@ -8,8 +8,16 @@
+ &{/sound} {
+ 	/* Microsoft's DT (dtbo DV_A): DMIC1 is powered by MIC BIAS1, DMIC2 by MIC BIAS3 (mainline had no routing: the
+ 	 * DMICs stayed unpowered -> digital silence, rms 0) */
++	/*
++	 * SPK1 OUT (RX INT7) feeds the WSA8815, as on db845c. Without this route the amp's IN -> RDAC -> SPKR PGA -> SPKR
++	 * path has an unconnected input and DAPM powers it once, when the card binds. On a late card bind (the machine
++	 * driver is a module) the amp is already runtime-suspended then (regmap cache-only): the Bandgap (0x3103) and
++	 * RDAC (0x311c) writes fail with -EBUSY, DAPM still marks them on and never writes them again -> silent speaker.
++	 * With the route the path powers with the stream, after ASoC has resumed the amp.
++	 */
+ 	audio-routing = "DMIC1", "MIC BIAS1",
+-			"DMIC2", "MIC BIAS3";
++			"DMIC2", "MIC BIAS3",
++			"SpkrLeft IN", "SPK1 OUT";
+ 
+ 		/* a second front end (pcm 1,1) so capture and playback can run at once (one ASM session per FE:
+ 		 * "Audio Client already active" when both used MultiMedia1) - the speaker->mic loopback test */
+-- 
+2.43.0
+
