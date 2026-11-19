@@ -63,6 +63,13 @@ printf '[Wallet]\nEnabled=false\nFirst Use=false\n' > /home/user/.config/kwallet
 MRC=/home/user/.config/plasmamobilerc; touch $MRC
 grep -q '^\[InitialStart\]' $MRC || printf '\n[InitialStart]\nwizardRun=true\n' >> $MRC
 
+# mobile radio OFF by default (= nmcli radio wwan off): with a SIM, ModemManager enables the radio and ~2 s later the
+# modem dies on the RF QLink assertion (rflm_qlnk_ls_retry_cnt), taking Wi-Fi (firmware on the modem DSP) with it
+# (linuxduobench 2026-11-08; again 2026-11-19 with a Play SIM). The SIM stays visible; calls/data need that fixed first.
+mkdir -p /var/lib/NetworkManager
+grep -q '^WWANEnabled' /var/lib/NetworkManager/NetworkManager.state 2>/dev/null ||
+  printf '[main]\nNetworkingEnabled=true\nWirelessEnabled=true\nWWANEnabled=false\n' > /var/lib/NetworkManager/NetworkManager.state
+
 # both screens: duo-hw switches the second panel (DSI-2) off unless /etc/duo/dual exists (or duo.dual=1)
 mkdir -p /etc/duo && touch /etc/duo/dual
 
