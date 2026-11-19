@@ -1,0 +1,176 @@
+From 70e5099b4ead03b68ddfe2450aee8dab1097e38e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 20:21:33 +0000
+Subject: [PATCH] ASoC: codecs: wsa881x: keep the PA gain across power-ups
+
+The SPKR PGA PRE_PMU sequence writes SPKR_DRV_GAIN = 0x41, i.e. +12 dB,
+every time the amp powers up, and "PA Volume" reads that register back.
+A gain set with the control is therefore lost on the next stream start:
+UCM sets PA Volume to 12 (+18 dB) once, but every later playback runs at
++12 dB (Surface Duo: "PA Volume" reads 8 after each PCM open).
+
+Store the gain in the driver, ramp to it in POST_PMU as the vendor driver
+does, and ramp at once only while the PA is running. The default stays
+the sequence's +12 dB.
+
+Also add a test knob "dre" (off by default): the vendor driver puts the
+PA in DRE mode (gain from the codec's compander) when the compander port
+is used, mainline always uses register mode.
+
+Signed-off-by: Claude <noreply@anthropic.com>
+---
+ sound/soc/codecs/wsa881x.c | 88 ++++++++++++++++++++++++++++++++------
+ 1 file changed, 75 insertions(+), 13 deletions(-)
+
+diff --git a/sound/soc/codecs/wsa881x.c b/sound/soc/codecs/wsa881x.c
+index 47ac3e498..6d1180466 100644
+--- a/sound/soc/codecs/wsa881x.c
++++ b/sound/soc/codecs/wsa881x.c
+@@ -199,7 +199,7 @@
+ 
+ #define WSA881X_PA_GAIN_TLV(xname, reg, shift, max, invert, tlv_array) \
+ 	SOC_SINGLE_EXT_TLV(xname, reg, shift, max, invert, \
+-			   snd_soc_get_volsw, wsa881x_put_pa_gain, tlv_array)
++			   wsa881x_get_pa_gain, wsa881x_put_pa_gain, tlv_array)
+ 
+ static const struct reg_default wsa881x_defaults[] = {
+ 	{ WSA881X_CHIP_ID0, 0x00 },
+@@ -675,8 +675,20 @@ struct wsa881x_priv {
+ 	bool hw_init;
+ 	bool port_prepared[WSA881X_MAX_SWR_PORTS];
+ 	bool port_enable[WSA881X_MAX_SWR_PORTS];
++	/* "PA Volume" as a G_* value, applied at every PA power-up */
++	int pa_gain;
++	bool pa_on;
+ };
+ 
++/*
++ * Android's sequence: with the compander port in use the PA gain comes from the
++ * codec's compander (DRE mode), otherwise from SPKR_DRV_GAIN (register mode).
++ * Off by default: register mode always, as before.
++ */
++static bool dre;
++module_param(dre, bool, 0644);
++MODULE_PARM_DESC(dre, "PA gain from the compander (DRE) when the COMP port is enabled");
++
+ static void wsa881x_init(struct wsa881x_priv *wsa881x)
+ {
+ 	struct regmap *rm = wsa881x->regmap;
+@@ -735,21 +747,15 @@ static int wsa881x_component_probe(struct snd_soc_component *comp)
+ 	return 0;
+ }
+ 
+-static int wsa881x_put_pa_gain(struct snd_kcontrol *kc,
+-			       struct snd_ctl_elem_value *ucontrol)
++static bool wsa881x_dre_mode(struct wsa881x_priv *wsa881x)
+ {
+-	struct snd_soc_component *comp = snd_kcontrol_chip(kc);
+-	struct soc_mixer_control *mc =
+-			(struct soc_mixer_control *)kc->private_value;
+-	int max = mc->max;
+-	unsigned int mask = (1 << fls(max)) - 1;
+-	int val, ret, min_gain, max_gain;
++	return dre && wsa881x->port_enable[WSA881X_PORT_COMP];
++}
+ 
+-	ret = pm_runtime_resume_and_get(comp->dev);
+-	if (ret < 0 && ret != -EACCES)
+-		return ret;
++static void wsa881x_ramp_pa_gain(struct snd_soc_component *comp, int max_gain)
++{
++	int val, ret, min_gain;
+ 
+-	max_gain = (max - ucontrol->value.integer.value[0]) & mask;
+ 	/*
+ 	 * Gain has to set incrementally in 4 steps
+ 	 * as per HW sequence
+@@ -774,6 +780,49 @@ static int wsa881x_put_pa_gain(struct snd_kcontrol *kc,
+ 
+ 		usleep_range(1000, 1010);
+ 	}
++}
++
++static int wsa881x_get_pa_gain(struct snd_kcontrol *kc,
++			       struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_component *comp = snd_kcontrol_chip(kc);
++	struct wsa881x_priv *wsa881x = snd_soc_component_get_drvdata(comp);
++	struct soc_mixer_control *mc =
++			(struct soc_mixer_control *)kc->private_value;
++
++	ucontrol->value.integer.value[0] = mc->max - wsa881x->pa_gain;
++
++	return 0;
++}
++
++static int wsa881x_put_pa_gain(struct snd_kcontrol *kc,
++			       struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_component *comp = snd_kcontrol_chip(kc);
++	struct wsa881x_priv *wsa881x = snd_soc_component_get_drvdata(comp);
++	struct soc_mixer_control *mc =
++			(struct soc_mixer_control *)kc->private_value;
++	int max = mc->max;
++	unsigned int mask = (1 << fls(max)) - 1;
++	long val = ucontrol->value.integer.value[0];
++	int ret;
++
++	if (val < 0 || val > max)
++		return -EINVAL;
++	val = (max - val) & mask;
++	if (val == wsa881x->pa_gain)
++		return 0;
++	wsa881x->pa_gain = val;
++
++	/* A running PA ramps now, otherwise the next power-up applies it */
++	if (!wsa881x->pa_on || wsa881x_dre_mode(wsa881x))
++		return 1;
++
++	ret = pm_runtime_resume_and_get(comp->dev);
++	if (ret < 0 && ret != -EACCES)
++		return ret;
++
++	wsa881x_ramp_pa_gain(comp, val);
+ 
+ 	pm_runtime_put_autosuspend(comp->dev);
+ 
+@@ -925,9 +974,19 @@ static int wsa881x_spkr_pa_event(struct snd_soc_dapm_widget *w,
+ 
+ 		snd_soc_component_update_bits(comp, WSA881X_SPKR_DRV_GAIN,
+ 					      WSA881X_PA_GAIN_SEL_MASK,
++					      wsa881x_dre_mode(wsa881x) ?
++					      WSA881X_PA_GAIN_SEL_DRE :
+ 					      WSA881X_PA_GAIN_SEL_REG);
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMU:
++		/*
++		 * The PRE_PMU sequence resets the gain to +12 dB; ramp to the
++		 * "PA Volume" setting, as the vendor driver does.
++		 */
++		wsa881x->pa_on = true;
++		if (!wsa881x_dre_mode(wsa881x) && wsa881x->pa_gain != G_12DB)
++			wsa881x_ramp_pa_gain(comp, wsa881x->pa_gain);
++
+ 		if (wsa881x->port_prepared[WSA881X_PORT_VISENSE]) {
+ 			wsa881x_visense_txfe_ctrl(comp, true);
+ 			snd_soc_component_update_bits(comp,
+@@ -938,6 +997,7 @@ static int wsa881x_spkr_pa_event(struct snd_soc_dapm_widget *w,
+ 
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
++		wsa881x->pa_on = false;
+ 		if (wsa881x->port_prepared[WSA881X_PORT_VISENSE]) {
+ 			wsa881x_visense_adc_ctrl(comp, false);
+ 			wsa881x_visense_txfe_ctrl(comp, false);
+@@ -1115,6 +1175,8 @@ static int wsa881x_probe(struct sdw_slave *pdev,
+ 	if (!wsa881x)
+ 		return -ENOMEM;
+ 
++	/* The PRE_PMU sequence's gain */
++	wsa881x->pa_gain = G_12DB;
+ 	wsa881x->sd_n = devm_gpiod_get_optional(dev, "powerdown", GPIOD_OUT_LOW);
+ 	if (IS_ERR(wsa881x->sd_n))
+ 		return dev_err_probe(dev, PTR_ERR(wsa881x->sd_n),
+-- 
+2.43.0
+

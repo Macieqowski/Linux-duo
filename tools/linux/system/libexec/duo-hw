@@ -57,10 +57,11 @@ start() {
 	done
 
 	# speaker DSP tuning (adsp-calibration.md): with it the DSP tunes the speaker, so PipeWire's stand-in EQ + limiter
-	# (60-duo-speaker-tuning.conf) must be off; without it (no vendor_a) the stand-in stays on
+	# (60-duo-speaker-tuning.conf) must be off; without it (no vendor_a) the stand-in stays on. The stand-in needs the
+	# ZaMaximX2 LADSPA limiter (zam-plugins): without it PipeWire fails to start in a loop, so then it stays off too.
 	T=/usr/libexec/duo/duo-speaker-tuning; [ -x $T ] || T=/usr/local/sbin/duo-speaker-tuning
 	P=/etc/pipewire/pipewire.conf.d/60-duo-speaker-tuning.conf
-	if [ -x $T ] && $T /mnt/vendor-fw > /dev/null 2>&1; then
+	if { [ -x $T ] && $T /mnt/vendor-fw > /dev/null 2>&1; } || [ ! -f /usr/lib/ladspa/ZaMaximX2-ladspa.so ]; then
 		[ -f $P ] && mv -f $P $P.off
 	else
 		[ -f $P.off ] && [ ! -f $P ] && mv $P.off $P
