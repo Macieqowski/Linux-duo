@@ -15,3 +15,4 @@ debian/nftables.conf:etc/nftables.conf
 debian/org.duo.HingeGap.desktop:etc/xdg/autostart/org.duo.HingeGap.desktop
 debian/chromium-duo:etc/chromium.d/duo
 debian/81-duo-ssc.rules:etc/udev/rules.d/81-duo-ssc.rules
+debian/org.duo.Posture.desktop:etc/xdg/autostart/org.duo.Posture.desktop

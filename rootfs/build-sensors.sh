@@ -30,6 +30,12 @@ for p in libssc-* iio-sensor-proxy-*; do
 done
 apt-get -y install ./iio-sensor-proxy_*.deb > /dev/null
 apt-mark hold iio-sensor-proxy > /dev/null
+# the hinge angle client for duo-posture (screens follow the hinge); libssc has no hinge class
+if [ -f /tmp/duo-hinge.c ]; then
+  mkdir -p /usr/libexec/duo
+  cc -O2 /tmp/duo-hinge.c $(pkg-config --cflags --libs libssc) -o /usr/libexec/duo/duo-hinge && echo "sensors: duo-hinge built" ||
+    echo "WARNING: duo-hinge build failed"
+fi
 rm -f /etc/apt/sources.list.d/sid-src.list
 apt-get -y purge devscripts equivs > /dev/null 2>&1 || true
 apt-get -y autoremove > /dev/null 2>&1 || true

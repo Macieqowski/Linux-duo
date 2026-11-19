@@ -79,7 +79,7 @@ if [ "${SKIP_IPTSD:-0}" != 1 ]; then
 fi
 if [ "${SKIP_SENSORS:-0}" != 1 ]; then
   log "libssc + iio-sensor-proxy backport (sensors, auto-rotate, hinge)"
-  cp "$REPO/rootfs/build-sensors.sh" "$L/patches/hexagonrpcd-keep-serving.py" "$R/tmp/"; in_chroot sh /tmp/build-sensors.sh || echo "WARNING: sensor backport failed"
+  cp "$REPO/rootfs/build-sensors.sh" "$L/patches/hexagonrpcd-keep-serving.py" "$L/hinge/duo-hinge.c" "$R/tmp/"; in_chroot sh /tmp/build-sensors.sh || echo "WARNING: sensor backport failed"
 fi
 
 if [ -n "$KOUT" ]; then
