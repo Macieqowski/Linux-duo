@@ -181,10 +181,10 @@ głosowe), śledzi połączenia w ModemManagerze i:
 - po rozłączeniu zamyka PCM i przywraca głośnik. Pierwszy obiekt połączenia przychodzącego w ModemManagerze często
   znika po 1–3 s i pojawia się nowy, dlatego usługa czeka 6 s, zanim uzna nieodebrane połączenie za skończone.
 
-W rozmowie usługa bierze mikrofon u dołu prawej połówki (`DMIC MUX7` = `DMIC1`, ten sam co Android) z `DEC7 Volume` 90
-(+6 dB, najlepszy z poziomów 66/74/82/90 w rozmowie testowej). `DMIC2` to mikrofon u góry lewej połówki. `DMIC3` czyta
-drugą krawędź tej samej linii danych co `DMIC2`, więc daje ten sam mikrofon (korelacja 0,99), a `DMIC0`, `DMIC4` i
-`DMIC5` dają cyfrowe zero (wcześniejszy komentarz w UCM „DMIC1 nie jest podłączony” był błędny). Profil HiFi w UCM
+W rozmowie usługa bierze mikrofon u dołu prawej połówki (`DMIC MUX7` = `DMIC1`, ten sam co Android) z `DEC7 Volume` 98
+(+14 dB, najlepszy z poziomów 66–114 w dwóch rozmowach testowych). `DMIC2` to mikrofon u góry lewej połówki. `DMIC3`
+czyta drugą krawędź tej samej linii danych co `DMIC2`, więc daje ten sam mikrofon (korelacja 0,99), a `DMIC0`, `DMIC4`
+i `DMIC5` dają cyfrowe zero (wcześniejszy komentarz w UCM „DMIC1 nie jest podłączony” był błędny). Profil HiFi w UCM
 (`DMIC3` + `DMIC2`) nagrywa więc na razie dwa razy górny mikrofon. W nagraniu HiFi kanał z `DEC7` wychodzi ok. 20 dB
 głośniej niż z `DEC8` przy tym samym ustawieniu (ten sam mikrofon na `DMIC3` i `DMIC2`), więc poziomów z nagrania nie
 da się przenieść wprost na rozmowę.
