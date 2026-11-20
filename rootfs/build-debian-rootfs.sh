@@ -72,6 +72,12 @@ grep -v '^#' "$L/debian/duo-files.list" | while IFS=: read -r src dst; do
   case $src in *.sh) mode=755 ;; *) mode=644 ;; esac
   install -Dm$mode "$L/$src" "$R/$dst"
 done
+# Plasma Dialer's call page: Speaker/Mute buttons that show their state (README, "Przyciski rozmowy"); the apt hook
+# puts the fix back after a plasma-dialer upgrade
+install -Dm755 "$L/debian/dialer/duo-dialer-callpage-patch.py" "$R/usr/libexec/duo/duo-dialer-callpage-patch"
+install -Dm644 "$L/debian/dialer/99-duo-dialer-patch" "$R/etc/apt/apt.conf.d/99-duo-dialer-patch"
+in_chroot sh -c 'command -v zstd >/dev/null || apt-get -q -y install zstd >/dev/null'
+in_chroot python3 -I /usr/libexec/duo/duo-dialer-callpage-patch --install || echo "WARNING: dialer call-page patch failed"
 
 if [ "${SKIP_IPTSD:-0}" != 1 ]; then
   log "iptsd (touch and pen)"

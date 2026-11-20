@@ -26,6 +26,7 @@ LUX = [0, 1, 2, 5, 10, 21, 40, 70, 110, 165, 250, 400, 650, 1000, 1700, 3000, 50
 SETTING = [11, 26, 32, 44, 55, 67, 79, 89, 97, 106, 113, 125, 141, 154, 172, 194, 213, 236, 255]   # 0..255
 TABLE = [(l, (s - 1) / 254.0) for l, s in zip(LUX, SETTING)]
 DEBOUNCE_UP, DEBOUNCE_DOWN = 1.5, 8.0      # seconds (config_autoBrightnessBrightening/DarkeningLightDebounce)
+SMOOTH_S = 1.2                             # time constant of the light average, seconds (see on_level)
 state = {"set": None, "fade": None, "written": {}, "pending": None}
 
 def curve(lux):
@@ -304,16 +305,27 @@ def fade_to(target):
 def on_level(lux):
     if os.path.exists(OFF):
         return
-    # smooth in log space (a hand passing, a flicker or a reflection should not move the screens), then act only on
-    # a clear change of the target level
-    ll = math.log10(max(lux, 0.0) + 1.0)
-    state["ll"] = ll if state.get("ll") is None else state["ll"] + 0.35 * (ll - state["ll"])
+    state["raw"] = math.log10(max(lux, 0.0) + 1.0)
+    if state.get("ll") is None:
+        state["ll"], state["t_ll"] = state["raw"], time.monotonic()
     decide()
+
+def smooth():
+    """Average in log space (a hand passing, a flicker or a reflection should not move the screens), in TIME, not per
+    reading: the PA22A reports on change only, so after a change the readings stop once the light is steady. A
+    per-reading average (0.35 of the way per reading, until 2026-11-20) stopped wherever the last reading left it: on
+    the phone it showed 27.8 lux in a room at 38-41 lux and 53.5 lux at 62 lux, and a lamp switched on with only one
+    or two readings would have stayed far off. Now it keeps moving toward the last reading every 0.5 s."""
+    now = time.monotonic()
+    a = 1.0 - math.exp(-max(0.0, now - state.get("t_ll", now)) / SMOOTH_S)
+    state["ll"] += a * (state.get("raw", state["ll"]) - state["ll"])
+    state["t_ll"] = now
 
 def decide():
     """the light only produces events when it changes: also called every 0.5 s so a debounce can complete"""
     if state.get("ll") is None or os.path.exists(OFF):
         return True
+    smooth()
     lux = 10 ** state["ll"] - 1.0
     m = state.get("manual_ll")
     if m is not None:

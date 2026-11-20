@@ -210,8 +210,23 @@ wtyczka QML przekazuje te sygnały bez argumentu, więc strona rozmowy (`CallPag
 bool”) nigdy nie zaznacza przycisku i każde naciśnięcie wysyła `setSpeakerMode(true)` / `setMute(true)`. Drugie
 naciśnięcie niczego w demonie nie zmieniało (sprawdzone w zapisie szyny D-Bus z rozmowy testowej). Usługa śledzi
 więc też same wywołania i `true` przy już włączonym stanie traktuje jako drugie naciśnięcie: wysyła do demona
-`false` (w dzienniku „speaker button pressed again: off”). Ikony przycisków w dialerze nadal się nie zmieniają; to
-wymagałoby przebudowania Plasma Dialer.
+`false` (w dzienniku „speaker button pressed again: off”).
+
+Ikony i podświetlenie przycisków (od 2026-11-20): `CallPage.qml` czyta teraz stan z właściwości `DialerUtils.mute` i
+`DialerUtils.speakerMode` (wtyczka pyta o nie kde-telephony-daemon) zamiast z argumentu sygnału, a przy starcie każdej
+rozmowy ustawia oba przyciski według stanu demona. Strona jest zasobem rcc wewnątrz programu `/usr/bin/plasma-dialer`,
+a przebudowa dialera wymaga całego środowiska KF6, więc `tools/linux/debian/dialer/duo-dialer-callpage-patch.py`
+podmienia tylko ten jeden zasób w kopii programu: znajduje skompresowany blok (zstd albo zlib), zmienia tekst,
+kompresuje go z powrotem i wpisuje w to samo miejsce (nowy blok nie może być dłuższy od starego). Reszta programu się
+nie zmienia. Obraz systemu robi to przy budowaniu (`--install`, oryginał w `/var/lib/duo/plasma-dialer.orig`), a hak apt
+`99-duo-dialer-patch` powtarza to po aktualizacji pakietu. Na telefonie (Plasma Dialer 1:6.3.5-1): blok 1799 -> 1781
+bajtów, dialer startuje bez błędów z `CallPage.qml`. Napis „Mute” zostaje ten sam, bo dialer go nie zmienia. Działanie
+przycisków w rozmowie: w trakcie sprawdzania.
+
+Wyciszenie w rozmowie testowej 2026-11-20 o 17:07: po włączeniu i wyłączeniu głośnika żadne naciśnięcie Mute nie
+dotarło do dialera (bez podświetlenia, bez wywołania `setMute`), choć czerwony przycisk rozłączenia działał. Zablokowanie
+KWin, dialera albo iio-sensor-proxy przez czujnik zbliżeniowy lub światła sprawdzone i wykluczone (odpowiedzi poniżej
+55 ms przy uruchamianiu `monitor-sensor`). Przyczyna w trakcie badania (zapis dotyku i okien w następnej rozmowie).
 
 - Głośnik: w rozmowie obie trasy zostają podłączone (słuchawka `RX INT0`, głośnik `RX INT7` -> `SpkrLeft`), a
   przełączenie zmienia tylko głośności cyfrowe (`RX0`/`RX7 Digital Volume`, 0 = -84 dB). Zmiana trasy przy otwartym
@@ -427,6 +442,14 @@ czasie usługa zwalnia czujnik i zajmuje go ponownie po 6, 12, 24, 48, 96 i 192 
 zacięty sterownik w proxy ustawia odpytywanie od nowa). Gdy iio-sensor-proxy się zrestartuje, usługa zajmuje czujnik
 od nowa. PowerDevil pamięta jasność między uruchomieniami, więc bez odczytu ekrany startują z ostatnią wartością
 (po dwóch restartach 394 z 10000, czyli 13 z 1023: bardzo ciemno, ruch suwaka to poprawia).
+
+Sprawdzone z lampą 2026-11-20 (17:04–17:07): po zapaleniu światła czujnik podał 38–64 lx, przy zasłonięciu 0, przy
+lampie z bliska do 4031 lx, a jasność obu ekranów szła za tym razem (28 %, przy lampie 77 %, potem 32 %). Uśrednianie
+odczytów liczyło się wcześniej przy każdym odczycie (0,35 drogi do nowej wartości). Czujnik wysyła odczyty tylko przy
+zmianie, więc średnia zostawała tam, gdzie zostawił ją ostatni odczyt: usługa liczyła 27,8 lx w pokoju z 38–41 lx i
+53,5 lx przy 62 lx, a lampa zapalona jednym skokiem zostałaby daleko w tyle. Teraz średnia co 0,5 s idzie dalej do
+ostatniego odczytu (stała czasowa 1,2 s). Ręka przesunięta nad czujnikiem przez sekundę nadal niczego nie zmienia, bo
+ściemnienie musi trwać 8 s.
 
 Przy wygaszonych ekranach (bezczynność, przycisk zasilania, zamknięty telefon) sterownik podświetlenia DSI odrzuca
 zapis jasności (`EINVAL`). Jądro i tak zapamiętuje wartość, a sterownik panelu wysyła ją po włączeniu ekranu, więc
