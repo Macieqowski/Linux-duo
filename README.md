@@ -178,12 +178,18 @@ głosowe), śledzi połączenia w ModemManagerze i:
 
 - przy dzwonieniu (przychodzącym albo wybieraniu numeru) dokłada w kodeku tor słuchawki, tor głośnika zostaje (dzwonek);
 - przy odebraniu, a przy wychodzącym już przy sygnale dzwonienia, wyłącza tor głośnika i od razu otwiera PCM głosowy;
-- po rozłączeniu zamyka PCM i przywraca głośnik. W rozmowie podbija mikrofon (`DEC7 Volume`) o 6 dB.
+- po rozłączeniu zamyka PCM i przywraca głośnik.
+
+W rozmowie usługa bierze mikrofon u dołu prawej połówki (`DMIC MUX7` = `DMIC1`, ten sam co Android) z `DEC7 Volume`
+60 (-24 dB), bo jest on o ok. 25 dB czulszy od górnego i przy 0 dB przesterowuje. `DMIC2` to mikrofon u góry lewej
+połówki. `DMIC3` czyta drugą krawędź tej samej linii danych co `DMIC2`, więc daje ten sam mikrofon (korelacja 0,99),
+a `DMIC0`, `DMIC4` i `DMIC5` dają cyfrowe zero. Profil HiFi w UCM (`DMIC3` + `DMIC2`) nagrywa więc na razie dwa razy
+górny mikrofon.
 
 Kodek trzeba przełączyć na słuchawkę chwilę przed startem toru głosowego. Gdy przełączenie było tuż przed startem
 (w `dmesg`: `overflow error on RX port 0`), słuchawka milczała aż do ponownego otwarcia PCM, przy dowolnym odstępie
 od odebrania. Dlatego usługa przełącza kodek już przy dzwonieniu; dźwięk jest ok. 1,5 s po odebraniu. Ustawienia
-(głośność słuchawki, podbicie mikrofonu, start przy sygnale dzwonienia) są w `/etc/default/duo-call-audio`, opis
+(głośność słuchawki, mikrofon i jego czułość, start przy sygnale dzwonienia) są w `/etc/default/duo-call-audio`, opis
 w nagłówku skryptu. Nie przeładowuj modułów q6voice w działającym systemie: karta się przebindowuje i porty AFE
 nie działają aż do restartu telefonu.
 
