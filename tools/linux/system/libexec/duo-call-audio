@@ -21,8 +21,8 @@ EAR_PA = int(os.environ.get('DUO_CALL_EAR_PA', '4'))  # EAR PA Volume, 4 = +6 dB
 # the call microphone (DMIC MUX7 -> DEC7 -> TX7 = the vocproc's mic): DMIC1 = bottom of the right half (Android's
 # handset mic); DMIC2 and DMIC3 read one mic at the top of the left half (two edges of one data line); DMIC0/4/5 unused
 CALL_DMIC = os.environ.get('DUO_CALL_DMIC', 'DMIC1')
-# DEC7 Volume during calls (84 = 0 dB): DMIC1 is ~25 dB hotter than DMIC2 and clips at 0 dB
-MIC_VOLUME = os.environ.get('DUO_CALL_MIC_VOLUME', '60')
+# DEC7 Volume during calls (84 = 0 dB): 90 = +6 dB, the best of 66/74/82/90 in a test call (2026-11-20)
+MIC_VOLUME = os.environ.get('DUO_CALL_MIC_VOLUME', '90')
 MIC_BOOST_DB = int(os.environ.get('DUO_CALL_MIC_BOOST', '6'))  # with DUO_CALL_MIC_VOLUME empty: added to DEC7
 # open the voice path already while an outgoing call rings (network ringback tone) instead of at answer
 OPEN_ON_RINGING_OUT = os.environ.get('DUO_CALL_OPEN_RINGING_OUT', '1') == '1'
