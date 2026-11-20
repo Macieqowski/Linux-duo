@@ -19,6 +19,9 @@ SOURCE = os.environ.get('DUO_CALL_SOURCE', 'alsa_input.platform-sound.HiFi__Mic_
 EAR_RX0_VOLUME = int(os.environ.get('DUO_CALL_EAR_VOLUME', '84'))  # RX0 digital volume, 84 = 0 dB
 EAR_PA = int(os.environ.get('DUO_CALL_EAR_PA', '4'))  # EAR PA Volume, 4 = +6 dB (Android handset)
 MIC_BOOST_DB = int(os.environ.get('DUO_CALL_MIC_BOOST', '6'))  # added to DEC7 (the call microphone) during calls
+# the call microphone (DMIC MUX7 -> DEC7 -> TX7 = the vocproc's mic): the HiFi profile has DMIC3 there, the left
+# half's mic next to the speaker; DMIC2 is the right half's mic, next to the earpiece
+CALL_DMIC = os.environ.get('DUO_CALL_DMIC', 'DMIC2')
 # open the voice path already while an outgoing call rings (network ringback tone) instead of at answer
 OPEN_ON_RINGING_OUT = os.environ.get('DUO_CALL_OPEN_RINGING_OUT', '1') == '1'
 TX_TOPOLOGY_NONE = 0x10F70
@@ -166,7 +169,7 @@ class VoicePcm:
 
 # --- routing ---
 SAVED_CONTROLS = ['RX INT0_1 MIX1 INP0', 'RX INT0 DEM MUX', 'RX INT7_1 MIX1 INP0', 'EAR PA Volume',
-                  'RX0 Digital Volume', 'DEC7 Volume']
+                  'RX0 Digital Volume', 'DEC7 Volume', 'DMIC MUX7']
 
 
 class CallAudio:
@@ -184,6 +187,8 @@ class CallAudio:
                  ('%s TX Topology' % VOICE_PCM, TX_TOPOLOGY_NONE),
                  ('RX INT0_1 MIX1 INP0', 'RX0'), ('RX INT0 DEM MUX', 'CLSH_DSM_OUT'),
                  ('EAR PA Volume', EAR_PA), ('RX0 Digital Volume', EAR_RX0_VOLUME)]
+        if CALL_DMIC:
+            pairs.append(('DMIC MUX7', CALL_DMIC))
         if dec7 and dec7.lstrip('-').isdigit() and MIC_BOOST_DB:
             pairs.append(('DEC7 Volume', min(int(dec7) + MIC_BOOST_DB, 124)))
         cset(pairs)
