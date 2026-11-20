@@ -63,9 +63,9 @@ const app = new Gtk.Application({application_id: 'org.duo.TouchCalib'});
 let open = 0, measuring = 0, haveFix = false;
 
 function screenWindow(monitor) {
-    const name = monitor.get_connector() || 'screen';
-    const geo = monitor.get_geometry();
-    const win = new Gtk.ApplicationWindow({application: app, title: 'Kalibracja dotyku ' + name});
+    const want = monitor.get_connector() || 'screen';
+    let name = want, geo = monitor.get_geometry();  // the screen the window is really on (enter-monitor below)
+    const win = new Gtk.ApplicationWindow({application: app, title: 'Kalibracja dotyku ' + want});
     const overlay = new Gtk.Overlay();
     const area = new Gtk.DrawingArea({hexpand: true, vexpand: true});
     // between the 25 % and 50 % target rows; not a touch target itself (taps must reach the drawing area)
@@ -80,9 +80,12 @@ function screenWindow(monitor) {
     overlay.add_overlay(box);
     win.set_child(overlay);
     // phases: wait (window not yet full screen), nofull (gave up waiting), measure, result, test
-    const st = {phase: 'wait', i: 0, taps: [], dots: [], lastUp: 0, miss: false, result: null};
+    const st = {phase: 'wait', i: 0, taps: [], dots: [], lastUp: 0, miss: false, result: null, mon: null};
     const say = t => label.set_markup('<span size="large" foreground="white">' + t + '</span>');
-    const full = () => Math.abs(area.get_width() - geo.width) <= 2 && Math.abs(area.get_height() - geo.height) <= 2;
+    // full screen on the asked screen. Both screens have the same size, so the size alone does not tell which one:
+    // 2026-11-20 a DSI-2 window went full screen on DSI-1 and the left screen's taps were saved as DSI-2's
+    const full = () => st.mon !== null && name === want &&
+        Math.abs(area.get_width() - geo.width) <= 2 && Math.abs(area.get_height() - geo.height) <= 2;
 
     function start() {
         st.phase = 'measure'; st.i = 0; st.taps = []; st.dots = []; st.miss = false;
@@ -208,16 +211,20 @@ function screenWindow(monitor) {
     });
     function notFull() {
         const size = `${area.get_width()}x${area.get_height()}`;
-        printerr(`${name}: window ${size}, screen ${geo.width}x${geo.height}: not measuring`);
-        say(`${name}: okno nie zajmuje całego ekranu (${size} zamiast ${geo.width}x${geo.height}),\n` +
-            'pomiar byłby błędny. Naciśnij „Jeszcze raz”.');
+        const where = st.mon === null ? 'unknown screen' : name;
+        printerr(`${want}: window ${size} on ${where}, screen ${geo.width}x${geo.height}: not measuring`);
+        say(st.mon !== null && name !== want
+            ? `${want}: okno jest na ekranie ${name}, nie na ${want},\npomiar byłby błędny. Naciśnij „Jeszcze raz”.`
+            : `${want}: okno nie zajmuje całego ekranu (${size} zamiast ${geo.width}x${geo.height}),\n` +
+              'pomiar byłby błędny. Naciśnij „Jeszcze raz”.');
         bSave.visible = bReset.visible = false;
         box.visible = true;
         area.queue_draw();
     }
-    // measure only once the window covers the whole screen. KWin (Plasma Mobile) may first keep it maximized between
-    // the panels: then the taps would be measured in the window's fractions, not the screen's (DSI-2 2026-11-20:
-    // 529x648 of 529x706). Full screen is asked again every 1.5 s; after 9 s without it, no measurement.
+    // measure only once the window covers the whole asked screen. KWin (Plasma Mobile) may first keep it maximized
+    // between the panels: then the taps would be measured in the window's fractions, not the screen's (DSI-2
+    // 2026-11-20: 529x648 of 529x706), or put it on the other screen. Full screen on the asked screen is requested
+    // again every 1.5 s; after 9 s without it, no measurement.
     function whenFull() {
         st.phase = 'wait';
         box.visible = false;
@@ -246,6 +253,16 @@ function screenWindow(monitor) {
     }
     open++;
     win.present();
+    const surf = win.get_surface();
+    surf.connect('enter-monitor', (_s, m) => {
+        st.mon = m;
+        name = m.get_connector() || 'screen';
+        geo = m.get_geometry();
+    });
+    surf.connect('leave-monitor', (_s, m) => {
+        if (st.mon === m)
+            st.mon = null;
+    });
     win.fullscreen_on_monitor(monitor);
     whenFull();
 }

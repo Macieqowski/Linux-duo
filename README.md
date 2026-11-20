@@ -431,8 +431,11 @@ Wynik na telefonie 2026-11-20 (19:44–19:53):
 - **Średni błąd bez korekcji** (piksele logiczne, ekran 529×706): DSI-1 22–23 px (najwyżej 45), DSI-2 17 px
   (najwyżej 29).
 
-Od tej pory aplikacja mierzy tylko w oknie na cały ekran. Co 1,5 s ponawia prośbę o pełny ekran, a po 9 s bez niego
-nie mierzy i prosi o „Jeszcze raz”.
+Od tej pory aplikacja mierzy tylko w oknie na cały ekran i tylko na tym ekranie, który ma mierzyć. Który to ekran,
+sprawdza po zdarzeniu `enter-monitor` okna, bo oba ekrany mają ten sam rozmiar. Przy powtórce prawego ekranu KWin
+otworzył jego okno na lewym i dane lewego zapisały się jako prawy; zostały cofnięte. Co 1,5 s aplikacja ponawia prośbę
+o pełny ekran na właściwym ekranie, a po 9 s bez niego nie mierzy i prosi o „Jeszcze raz”. Tylko jeden ekran:
+`/usr/libexec/duo/duo-touch-calib DSI-2`.
 
 W pierwszym pomiarze błąd przy bokach był mniejszy (20–38 px). Brzegi powtarzają się co do 0,01 %, więc to raczej
 właściwość digitizera i iptsd (pozycja przy samym brzegu się „przykleja”) niż niecelne stuknięcia. Skrajny pas 6 % ma
