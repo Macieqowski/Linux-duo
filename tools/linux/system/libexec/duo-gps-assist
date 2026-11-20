@@ -5,11 +5,24 @@
 # injects the UTC time and a fresh XTRA file (re-downloaded when older than 24 h), so any location client (ModemManager /
 # geoclue / Maps) starts warm. rmtfs is read-only = nothing persists in the modem: run after every modem start.
 # The XTRA file comes from the modem's own servers (path1..3.xtracloud.net, the URLs the modem reports itself).
+# 2026-11-20: the Debian image has no wget (only curl), and ICMP to the internet can be filtered while the network works,
+# so the old wget/ping wait never ended and no XTRA was ever downloaded. Now: wait for a DNS answer, fetch with curl
+# (wget or python3 when curl is missing).
 X=/var/cache/duo-gps/xtra3grcej.bin; mkdir -p ${X%/*}
-for i in $(seq 1 60); do wget -q -T 5 --spider http://path1.xtracloud.net/ 2>/dev/null && break; ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 && break; sleep 5; done
+get() {  # URL FILE
+  if command -v curl >/dev/null 2>&1; then curl -fsS -m 30 -o "$2" "$1"
+  elif command -v wget >/dev/null 2>&1; then wget -q -T 20 -O "$2" "$1"
+  else python3 -I -c 'import sys, urllib.request
+open(sys.argv[2], "wb").write(urllib.request.urlopen(sys.argv[1], timeout=30).read())' "$1" "$2"; fi
+}
+for i in $(seq 1 60); do getent hosts path1.xtracloud.net >/dev/null 2>&1 && break; sleep 5; done
 if [ ! -s $X ] || [ -n "$(find $X -mmin +1440 2>/dev/null)" ]; then
-  for h in path1 path2 path3; do wget -q -T 20 -O $X.new http://$h.xtracloud.net/xtra3grcej.bin && [ -s $X.new ] && mv $X.new $X && break; done
+  for h in path1 path2 path3; do
+    rm -f $X.new
+    get http://$h.xtracloud.net/xtra3grcej.bin $X.new && [ "$(stat -c %s $X.new 2>/dev/null || echo 0)" -gt 1000 ] && mv $X.new $X && break
+  done
+  rm -f $X.new
 fi
 [ -s $X ] && A="DUO_GPS_XTRA=$X" || A=""
-echo "duo-gps-assist: xtra $( [ -s $X ] && ls -la $X | awk '{print $5" bytes, "$6" "$7" "$8}' || echo missing)"
+echo "duo-gps-assist: $(date '+%F %T') xtra $( [ -s $X ] && ls -la $X | awk '{print $5" bytes, "$6" "$7" "$8}' || echo missing)"
 env DUO_GPS_LOCK=none DUO_GPS_VERCHECK=0 DUO_GPS_TIME=1 $A timeout 90 /usr/local/bin/duo-gps 5 2>&1 | grep -E "indication|injected|parts|FAILED|duo-gps:"

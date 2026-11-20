@@ -22,14 +22,14 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | GPU (Adreno 640) | działa | Mesa freedreno/turnip z backports |
 | Wi-Fi, Bluetooth | działa | ath10k / hci_qca |
 | Dane komórkowe (LTE) | działa | modem + IPA v4.1 + ModemManager |
-| **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`, [dzwonek z wibracją i budzeniem ekranu](#dzwonek-wibracja-i-budzenie-ekranu), głośnik i wyciszenie (sprawdzone; ikony przycisków w dialerze się nie zmieniają), głośność rozmowy. Bez tłumienia echa |
+| **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`, [dzwonek z wibracją i budzeniem ekranu](#dzwonek-wibracja-i-budzenie-ekranu), głośnik i wyciszenie (sprawdzone, przyciski w dialerze pokazują swój stan), głośność rozmowy. Bez tłumienia echa |
 | Głośnik, mikrofony | działa | WCD9340 + WSA8815, strojenie z ACDB telefonu. Na 7.3.5 głośnik milczał: [naprawione trasą w DT](#głośnik-cisza-na-735) |
 | Słuchawka do rozmów | działa | wyjście EAR kodeka (`0076`–`0079`); w rozmowie gra przez DSP ([dźwięk rozmowy](#dźwięk-rozmowy-q6voice)), [ciszej niż głośnik](#słuchawka-do-rozmów-wyjście-ear) |
 | Czujniki, zawias, obrót | działa | SLPI + hexagonrpcd + libssc (budowane w obrazie); [co działa w aplikacjach](#czujniki) |
 | Aparat | częściowo | wymaga modułu imx351 zbudowanego z danych Twojego telefonu |
 | Ładowanie, bateria | działa | qcom_smbx (SMB5) + 2x bq27742 |
 | Usypianie | wyłączone | s2idle działa, ale telefon się nie budził; na razie bez usypiania |
-| GPS | częściowo | pozycja z sieci tak, fix satelitarny niepotwierdzony |
+| GPS | częściowo | pozycja z sieci tak, fix satelitarny niepotwierdzony; [pomoc XTRA](#gps) |
 | Czytnik linii papilarnych | nie | siedzi w TrustZone |
 
 ## Jak to się uruchamia
@@ -496,6 +496,23 @@ ją bez sprawdzenia, więc jedno zdarzenie `EV_FF`/`FF_GAIN` z przestrzeni użyt
 haptyki) to wywołanie pustego wskaźnika: Duo od razu resetuje się do bootloadera, bez śladu w pstore. Zwykłe efekty
 bez `FF_GAIN` (np. `FF_RUMBLE`, którego używa `hfd-service`) działają. Patch `0075` przestaje zgłaszać `FF_GAIN`, więc
 jądro takie zdarzenie ignoruje. Test na telefonie: w toku.
+
+## GPS
+
+GNSS jest częścią modemu: `duo-gps` (`tools/linux/modem/duo-gps.c`) to klient QMI LOC, który trzyma jedną sesję i
+wypisuje raporty satelitów i pozycji. Współrzędnych nigdy nie wypisuje (tylko „fix=yes (coordinates withheld)”,
+niepewność w metrach i maskę technologii: `0x2` = pozycja z masztów sieci, nie z satelitów). Usługa `duo-gps-assist`
+po starcie modemu zdejmuje blokadę silnika, wyłącza sprawdzanie wersji XTRA, wstrzykuje czas UTC i dane orbit XTRA
+(`xtra3grcej.bin` z serwerów samego modemu, `path1..3.xtracloud.net`, w `/var/cache/duo-gps`, odświeżane po 24 h).
+Bez tych danych silnik szuka satelitów od zera.
+
+Poprawka 2026-11-20: w obrazie Debiana nie ma `wget`, a skrypt czekał na sieć przez `wget --spider` albo `ping
+1.1.1.1` (ICMP do internetu bywa blokowany, choć sieć działa). Pętla nigdy się nie kończyła i XTRA nie zostało
+pobrane ani razu (`/var/cache/duo-gps` był pusty). Teraz skrypt czeka na odpowiedź DNS dla `path1.xtracloud.net`
+i pobiera plik przez `curl` (zapasowo `wget` albo `python3`).
+
+ModemManager zgłasza źródła lokalizacji `3gpp-lac-ci`, `gps-raw`, `gps-nmea`, `agps-msa`, `agps-msb`; domyślnie
+włączone jest tylko `3gpp-lac-ci`. Geoclue i aplikacji z mapą w obrazie jeszcze nie ma.
 
 ## Budowanie
 
