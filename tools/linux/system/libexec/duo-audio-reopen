@@ -1,0 +1,20 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo, Plasma Mobile (2026-11-20): the microphone stream PipeWire opens when the session starts records
+# garbage. A 1500 Hz tone from the phone's own speaker did not show on either channel, while a second open of the
+# same PCM is clean (tone ~50 dB over its neighbours): after a card profile cycle (off -> HiFi) and after a PipeWire
+# restart alike. The cause is still open (the first capture open after boot; no TX port errors in dmesg). Run once
+# at login from duo-volume-nudge (XDG autostart), before its volume nudge: switch the card profile off and back to
+# HiFi, then put the default sink/source back if they moved. Off: touch /etc/duo/audio-reopen-off.
+CARD=alsa_card.platform-sound
+[ -e /etc/duo/audio-reopen-off ] && exit 0
+prof=$(pactl list cards 2>/dev/null | awk -v c="$CARD" '$1 == "Name:" { n = $2 } n == c && /Active Profile:/ { print $3; exit }')
+[ "$prof" = HiFi ] || exit 0
+sink=$(pactl get-default-sink); src=$(pactl get-default-source)
+pactl set-card-profile "$CARD" off || exit 0
+sleep 2
+pactl set-card-profile "$CARD" HiFi
+sleep 2
+[ "$(pactl get-default-sink)" = "$sink" ] || pactl set-default-sink "$sink"
+[ "$(pactl get-default-source)" = "$src" ] || pactl set-default-source "$src"
+logger -t duo-audio-reopen "microphone stream reopened (profile off -> HiFi)"

@@ -4,7 +4,8 @@
 # poprawnie"): the top panel's volume slider binds before it has the default sink (plasmashell: VolumeChangedPopup.qml
 # "Cannot read property 'volume' of null") and shows 0 % until the first volume change, although the sink is at its
 # saved volume. Run once at login (XDG autostart): when the sink is there, set its volume 1 % off and back, so the
-# panel gets a change event and shows the real value.
+# panel gets a change event and shows the real value. Before that, duo-audio-reopen opens the microphone stream
+# again (the one opened at session start records garbage, 2026-11-20).
 i=0
 while [ $i -lt 30 ]; do
 	v=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | awk '/^Volume:/ {print $2}')
@@ -13,5 +14,16 @@ while [ $i -lt 30 ]; do
 done
 [ -n "$v" ] || exit 0
 sleep 5
+if [ -x /usr/libexec/duo/duo-audio-reopen ]; then
+	/usr/libexec/duo/duo-audio-reopen
+	i=0
+	while [ $i -lt 10 ]; do
+		v=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | awk '/^Volume:/ {print $2}')
+		[ -n "$v" ] && break
+		i=$((i + 1)); sleep 1
+	done
+	[ -n "$v" ] || exit 0
+	sleep 1
+fi
 n=$(awk -v v="$v" 'BEGIN { x = (v >= 0.01) ? v - 0.01 : v + 0.01; printf "%.2f", x }')
 wpctl set-volume @DEFAULT_AUDIO_SINK@ "$n" && sleep 0.3 && wpctl set-volume @DEFAULT_AUDIO_SINK@ "$v"

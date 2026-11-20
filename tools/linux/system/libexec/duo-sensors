@@ -56,13 +56,17 @@ daemon_alive $PID || { log "hexagonrpcd did not stay up (see /var/log/duo-hexago
 log "SLPI + hexagonrpcd up ($HX)"
 # The DSP's sensor service registers its sensors a few seconds after hexagonrpcd is up. iio-sensor-proxy (ordered after
 # this service) started inside that window half-initialises ("driver_set_polling: assertion 'sensor_device' failed")
-# and then reports light = 0 lux forever (2026-11-08, Debian). Wait until the light sensor answers before returning.
+# and then reports light = 0 lux forever (2026-11-08, Debian). Wait until the sensors answer before returning. The
+# probe asks the accelerometer, which streams all the time: the light sensor (TXC PA22A) reports on change only and
+# in a dark room sends nothing at all, so a light probe waited the full 40 s at every evening boot (2026-11-20) and
+# held back auto-rotate and the proximity sensor too.
 if command -v ssccli > /dev/null; then
 	for i in $(seq 1 10); do
-		timeout 6 ssccli --sensor light --timeout 3 2>/dev/null | grep -q 'Light sensor measurement' && { log "sensors answer (light) after ${i} tries"; exit 0; }
+		timeout 6 ssccli --sensor accelerometer --timeout 2 2>/dev/null | grep -q 'Accelerometer sensor measurement' && {
+			sleep 2; log "sensors answer (accelerometer) after ${i} tries"; exit 0; }
 		sleep 1
 	done
-	log "light sensor did not answer within ~40 s - iio-sensor-proxy may start without it"
+	log "accelerometer did not answer within ~40 s - iio-sensor-proxy may start without the sensors"
 else
 	sleep 5   # no libssc CLI (pmOS): a fixed settle time
 fi

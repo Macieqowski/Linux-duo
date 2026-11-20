@@ -50,7 +50,8 @@ partycji startowych, a na Duo 1 to dokładnie ta klasa zmian, która zbrickował
 - Odblokowanie bootloadera (`fastboot flashing unlock`) kasuje dane Androida.
 - Po instalacji nie uruchamiaj Androida normalnie: zobaczy obcy `userdata` i może zaproponować przywrócenie
   ustawień fabrycznych, a to skasuje Debiana.
-- Przed `fastboot boot` zawsze `fastboot --set-active=a` (inaczej bootloader odmawia).
+- Przed `fastboot boot` zawsze `fastboot --set-active=a` (inaczej bootloader odmawia). Bootloader wraca na slot b po
+  każdym restarcie (2026-11-20 trzy razy z rzędu), więc sprawdzaj `fastboot getvar current-slot` za każdym razem.
 - Restart z Linuxa: `devmem 0x0c264000 w 0` (zwykły `reboot` zawiesza ten telefon).
 
 ## Modem: obejście awarii (quick offline)
@@ -269,6 +270,14 @@ naprawiło kanał (ton czysty, 52 dB nad tłem). Ten sam stan był po uruchomien
 otwarty przy starcie sesji nie nagrywał tonu na żadnym kanale, po przełączeniu profilu oba były czyste. Przyczyna
 jest jeszcze nieznana. Gdyby w rozmowie zamiast głosu był szum, pomoże to samo przełączenie profilu.
 
+Dlatego od 2026-11-20 przełączenie robi się samo raz po zalogowaniu: `duo-volume-nudge` (autostart XDG), gdy pojawi
+się głośnik i minie 5 s, wywołuje `duo-audio-reopen`. Ten przełącza profil karty na `off` i z powrotem na `HiFi`
+(tylko gdy był `HiFi`), przywraca domyślne wyjście i wejście, jeśli się zmieniły, i zapisuje w dzienniku
+„microphone stream reopened”. Dopiero potem idzie poprawka suwaka głośności. Wyłączenie: plik
+`/etc/duo/audio-reopen-off`. Sprawdzone w dwóch uruchomieniach telefonu (16:30 i 16:40): jedna linia w dzienniku
+ok. 43 s po starcie, domyślne urządzenia bez zmian, głośność 100 %, ton z głośnika czysty na obu kanałach (50 i 44 dB
+nad sąsiednimi pasmami), bez żadnego ręcznego kroku.
+
 `pactl suspend-source` nie zwalnia mikrofonu, bo plasmashell (plasma-pa) cały czas trzyma na nim i na monitorze
 głośnika strumienie mierników głośności („PlasmaPA-VolumeMeter”). Przez to nagrywanie i odtwarzanie przez PipeWire
 działa bez przerwy, także przy wygaszonych ekranach, co kosztuje baterię. Do zbadania.
@@ -407,6 +416,18 @@ ruch suwaka.
 Bez PowerDevil (inna powłoka albo plik `/etc/duo/autobrightness-no-powerdevil`) usługa pisze oba podświetlenia sama
 i kopiuje ruch suwaka z jednego ekranu na drugi, jak wcześniej.
 
+Czujnik światła (TXC PA22A w SLPI) wysyła odczyt tylko przy zmianie, a iio-sensor-proxy do pierwszego odczytu
+pokazuje `LightLevel` 0. Po dwóch uruchomieniach 2026-11-20 wieczorem żaden odczyt nie przyszedł: raz proxy wystartowało,
+gdy procesor czujników jeszcze się ustawiał („driver_set_polling: assertion 'sensor_device' failed”), i trzymało 0,
+choć `ssccli` czytał 35 lx; dwa razy czujnik w ciemnym, nieruchomym pokoju nie wysłał nic, także do `ssccli` (tak samo
+w nocy 2026-11-07, zob. `docs-linuxduobench/drivers/sensors.md`). Usługa brała to 0 za ciemność i ustawiała minimum
+krzywej (ekrany na 4 %). Teraz 0 odczytane tuż po zajęciu czujnika nigdy nie jest stosowane: ekrany zostają na
+poziomie z PowerDevil, aż przyjdzie prawdziwy odczyt (sygnał `PropertiesChanged` albo wartość powyżej 0). W tym
+czasie usługa zwalnia czujnik i zajmuje go ponownie po 6, 12, 24, 48, 96 i 192 s (czujnik wyłącza się i włącza, a
+zacięty sterownik w proxy ustawia odpytywanie od nowa). Gdy iio-sensor-proxy się zrestartuje, usługa zajmuje czujnik
+od nowa. PowerDevil pamięta jasność między uruchomieniami, więc bez odczytu ekrany startują z ostatnią wartością
+(po dwóch restartach 394 z 10000, czyli 13 z 1023: bardzo ciemno, ruch suwaka to poprawia).
+
 Przy wygaszonych ekranach (bezczynność, przycisk zasilania, zamknięty telefon) sterownik podświetlenia DSI odrzuca
 zapis jasności (`EINVAL`). Jądro i tak zapamiętuje wartość, a sterownik panelu wysyła ją po włączeniu ekranu, więc
 odrzucony zapis liczy się jako zapisany. Wcześniej usługa pisała przez `open().write()` i błąd wychodził dopiero przy
@@ -432,6 +453,11 @@ Surowy magnetometr ma ok. 390 µT, ok. 8 razy więcej niż pole Ziemi (bez kalib
 metalu), ale kompas z niego bezpośrednio nie korzysta. `mag_cal` i `gyro_cal` otwierają się, lecz bez kalibracji w
 ruchu nie wysyłają danych. `sig_motion` (`sns_smd`) wywraca libssc (asercja w `sensor_open`), więc go nie otwieraj.
 Poza SSC Linux widzi tylko przetworniki ADC w PMIC-ach (temperatury, napięcia), żadnych innych czujników IIO.
+
+`duo-sensors` po uruchomieniu SLPI i `hexagonrpcd` czeka, aż czujniki odpowiedzą, i dopiero wtedy kończy (iio-sensor-proxy
+startuje po nim). Sprawdzał to czujnikiem światła, ale ten w ciemności milczy, więc po zmroku start czekał 40 s na
+darmo. Od 2026-11-20 pyta akcelerometr (`ssccli --sensor accelerometer`, do 10 prób), który odpowiada zawsze,
+i daje procesorowi czujników jeszcze 2 s. W dzienniku: „sensors answer (accelerometer) after N tries”.
 
 ## Wibracje: reset telefonu przy „sile wibracji”
 

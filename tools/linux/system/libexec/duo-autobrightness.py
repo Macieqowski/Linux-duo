@@ -338,23 +338,75 @@ def decide():
 
 bus = Gio.bus_get_sync(Gio.BusType.SYSTEM)
 proxy = Gio.DBusProxy.new_sync(bus, 0, None, "net.hadess.SensorProxy", "/net/hadess/SensorProxy", "net.hadess.SensorProxy")
+# The light sensor (TXC PA22A on the SLPI) reports on change only, and iio-sensor-proxy shows LightLevel 0 until the
+# first report. After two boots on 2026-11-20 none came: once the proxy started while the sensor hub was settling
+# ("driver_set_polling: assertion 'sensor_device' failed") and stayed at 0 while ssccli read 35 lux; once the sensor
+# sent nothing at all in a steady, dim room (also not to ssccli). This service then set the curve's minimum (screens at
+# 4 %). So a 0 read right after the claim is never applied: the screens keep PowerDevil's level until a real reading
+# arrives (a PropertiesChanged signal, or a value above 0). Meanwhile the claim is released and taken again after
+# 6, 12, 24, 48, 96 and 192 s (the sensor is switched off and on, and a stuck proxy driver sets up its polling again).
+light = {"seen": False, "tries": 0, "timer": 0}
+
+def later(sec, fn):
+    """one pending light timer at a time (a new one replaces it); fn returns True to run again"""
+    if light["timer"]:
+        GLib.source_remove(light["timer"])
+    me = [0]
+    def run():
+        if light["timer"] == me[0]:
+            light["timer"] = 0              # running now: a later() inside fn must not remove it
+        again = fn()
+        if again and not light["timer"]:
+            light["timer"] = me[0]
+            return True
+        return False
+    me[0] = light["timer"] = GLib.timeout_add_seconds(sec, run)
+
+def take(v):
+    if v is not None and v.unpack() > 0:
+        light["seen"] = True
+        on_level(v.unpack())
+
 def claim():
+    """True = iio-sensor-proxy not there yet, try again"""
     try:
         proxy.call_sync("ClaimLight", None, 0, 5000, None)
-        v = proxy.get_cached_property("LightLevel")
-        if v is not None:
-            on_level(v.unpack())
-        return False
     except GLib.Error as e:
         print("waiting for iio-sensor-proxy:", e.message, flush=True)
         return True
+    take(proxy.get_cached_property("LightLevel"))
+    if not light["seen"] and light["tries"] < 6:
+        later(6 << light["tries"], reclaim)
+    return False
+
+def reclaim():
+    if light["seen"]:
+        return False
+    light["tries"] += 1
+    print("no light reading from iio-sensor-proxy: claiming the sensor again (%d)" % light["tries"], flush=True)
+    try:
+        proxy.call_sync("ReleaseLight", None, 0, 5000, None)
+    except GLib.Error:
+        pass
+    later(1, claim)
+    return False
+
 def changed(p, props, invalidated):
     d = props.unpack()
     if "LightLevel" in d:
+        light["seen"] = True
         on_level(d["LightLevel"])
 proxy.connect("g-properties-changed", changed)
+
+def owner_changed(p, pspec):
+    """iio-sensor-proxy restarted: its claims are gone, claim again"""
+    if p.get_name_owner():
+        print("iio-sensor-proxy (re)started: claiming the light sensor", flush=True)
+        light["seen"], light["tries"] = False, 0
+        later(1, claim)
+proxy.connect("notify::g-name-owner", owner_changed)
 GLib.timeout_add(300, mirror)
 GLib.timeout_add(500, decide)
 if claim():
-    GLib.timeout_add_seconds(3, claim)
+    later(3, claim)
 GLib.MainLoop().run()
