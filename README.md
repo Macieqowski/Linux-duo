@@ -29,7 +29,7 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | Aparat | częściowo | wymaga modułu imx351 zbudowanego z danych Twojego telefonu |
 | Ładowanie, bateria | działa | qcom_smbx (SMB5) + 2x bq27742 |
 | Usypianie | wyłączone | s2idle działa, ale telefon się nie budził; na razie bez usypiania |
-| GPS | działa | fix z satelitów (GPS, GLONASS, Galileo) w ~6 min z [pomocą XTRA](#gps), 13–16 m; dla aplikacji przez geoclue, mapa Marble Maps |
+| GPS | działa | fix z satelitów (GPS, GLONASS, Galileo) w ~6 min z [pomocą XTRA](#gps), 13–16 m; dla aplikacji przez geoclue, mapa GNOME Maps |
 | Czytnik linii papilarnych | nie | siedzi w TrustZone |
 
 ## Jak to się uruchamia
@@ -517,7 +517,7 @@ przez pierwsze minuty nie było żadnego satelity. Gdy modem jest „ciepły”,
 sekundach. `duo-gps-assist.timer` powtarza pomoc co 12 h, bo dane XTRA i czas żyją tylko w pamięci modemu.
 
 Lokalizacja dla aplikacji idzie przez geoclue: `geoclue-2.0`, `libqt6positioning6-plugins` (wtyczka `geoclue2` dla
-aplikacji Qt) i mapa `marble-maps` są w obrazie. Geoclue bierze pozycję z GNSS modemu przez ModemManager (sam włącza
+aplikacji Qt) i mapa GNOME Maps (`gnome-maps`, dopasowuje się do wąskiego ekranu) są w obrazie. Geoclue bierze pozycję z GNSS modemu przez ModemManager (sam włącza
 źródło `gps-nmea` na czas, gdy jakaś aplikacja pyta, i wyłącza je potem). `tools/linux/debian/geoclue/90-duo.conf`
 (`/etc/geoclue/conf.d/`) wyłącza źródła, które wysyłają dane do usług w internecie (Wi-Fi, 3G) oraz NMEA z sieci
 lokalnej. Źródło statyczne zostaje włączone celowo, bez pliku `/etc/geolocation`: gdy Wi-Fi i źródło statyczne są
@@ -526,6 +526,9 @@ Aplikacje potrzebują agenta geoclue w sesji, a Plasma Mobile nie ma własnego. 
 `geoclue-2.0` (`/etc/xdg/autostart/geoclue-demo-agent.desktop`) startuje w Plasmie. Gdy agent jest zarejestrowany,
 geoclue 2.7 wpuszcza wszystkie aplikacje spoza Flatpaka bez pytania, a o aplikacje z Flatpaka pyta przez powiadomienie.
 Na telefonie `where-am-i` dostało pozycję „GPS GGA+RMC” z dokładnością 3 m po 13 s.
+Marble Maps (25.04) był najpierw, ale na telefonie działał wolno, źle reagował na dotyk, a jego przycisk pozycji nic
+nie robił: klient geoclue powstawał, lecz nigdy nie uruchamiał GPS (w tym samym czasie `where-am-i` dostało pozycję),
+a w `PositionButton.qml` jest błąd „ReferenceError: button is not defined”. Dlatego obraz ma GNOME Maps.
 
 ModemManager zgłasza źródła lokalizacji `3gpp-lac-ci`, `gps-raw`, `gps-nmea`, `agps-msa`, `agps-msb`; na stałe
 włączone jest tylko `3gpp-lac-ci`.
