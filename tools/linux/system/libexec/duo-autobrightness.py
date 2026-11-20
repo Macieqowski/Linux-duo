@@ -23,7 +23,7 @@ LUX = [0, 1, 2, 5, 10, 21, 40, 70, 110, 165, 250, 400, 650, 1000, 1700, 3000, 50
 SETTING = [11, 26, 32, 44, 55, 67, 79, 89, 97, 106, 113, 125, 141, 154, 172, 194, 213, 236, 255]   # 0..255
 TABLE = [(l, (s - 1) / 254.0) for l, s in zip(LUX, SETTING)]
 DEBOUNCE_UP, DEBOUNCE_DOWN = 1.5, 8.0      # seconds (config_autoBrightnessBrightening/DarkeningLightDebounce)
-state = {"set": None, "fade": None, "written": {}, "pending": None}
+state = {"set": None, "fade": None, "written": {}, "want": {}, "retry": {}, "pending": None}
 
 def curve(lux):
     lux = max(lux, 0.0)
@@ -69,17 +69,29 @@ def unbalanced(b, v, mx):
         lv = v / mx / gain(b, lv)
     return min(1.0, lv)
 
+def put(path, v):
+    """One backlight write. False when the panel refuses it: with the screens off (idle, power key, phone closed) the
+    DSI backlight answers EINVAL. A bare open().write() only fails when the file is closed, outside any try (a stray
+    "Exception ignored ... OSError: [Errno 22]" in the log), and the value was taken as written anyway: mirror() then
+    saw the next real read as a slider move and paused the automatic part (2026-11-20)."""
+    try:
+        with open(path, "w") as f:
+            f.write(str(v))
+        return True
+    except OSError:
+        return False
+
 def write(level):
     for b in backlights():
         try:
             mx = int(open(b + "/max_brightness").read())
             v = max(1, round(level * gain(b, level) * mx))
             cur = int(open(b + "/brightness").read())
-            if v != cur:                         # each write is a command to the panel: only real changes
-                open(b + "/brightness", "w").write(str(v))
+        except (OSError, ValueError):
+            continue
+        state["want"][b] = v                     # a refused write is tried again by mirror() when the screen is back
+        if v == cur or put(b + "/brightness", v):  # each write is a command to the panel: only real changes
             state["written"][b] = v
-        except OSError:
-            pass
 
 def mirror():
     """a backlight changed by someone else (the brightness slider): copy it to the other screen(s)"""
@@ -89,19 +101,30 @@ def mirror():
         except (OSError, ValueError):
             continue
         last = state["written"].get(b)
+        want = state["want"].get(b)
+        if last is not None and v == last and want is not None and want != v:
+            # refused while the screen was off: again every 2 s (each try is a panel command) until it takes it
+            if time.monotonic() >= state["retry"].get(b, 0.0):
+                if put(b + "/brightness", want):
+                    state["written"][b] = want
+                else:
+                    state["retry"][b] = time.monotonic() + 2.0
+            continue
         if last is not None and v != last:
             if state["fade"]:
                 GLib.source_remove(state["fade"]); state["fade"] = None
-            state["written"][b] = v              # the slider's screen: leave it alone (a second writer flickers)
+            state["written"][b] = state["want"][b] = v   # the slider's screen: leave it alone (a second writer flickers)
             for o in backlights():
                 if o != b:
                     try:
                         omx = int(open(o + "/max_brightness").read())
                         lv = unbalanced(b, v, mx)
                         ov = max(1, min(omx, round(lv * gain(o, lv) * omx)))
-                        open(o + "/brightness", "w").write(str(ov)); state["written"][o] = ov
-                    except OSError:
-                        pass
+                    except (OSError, ValueError):
+                        continue
+                    state["want"][o] = ov
+                    if put(o + "/brightness", ov):
+                        state["written"][o] = ov
             state["set"] = unbalanced(b, v, mx)
             state["manual_ll"] = state.get("ll")   # automatic pauses until the light changes a lot
             print("slider %s -> %d %% on both screens" % (os.path.basename(b), round(100 * v / mx)), flush=True)

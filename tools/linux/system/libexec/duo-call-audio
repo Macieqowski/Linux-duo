@@ -18,6 +18,10 @@ so every press sends setSpeakerMode(true) / setMute(true), never false; a true w
 therefore taken as the second press: this daemon sends the false to kde-telephony-daemon itself.
 When a call rings or comes up it also raises Plasma Dialer's window (a one-shot KWin script over D-Bus): a dialer
 already running in the background is otherwise kept behind by focus stealing prevention.
+Proximity: in a call on the earpiece (not the speaker), something near the proximity sensor by the earpiece (the face)
+darkens both screens and switches their touch off, as Android does; when it goes away the screens come back as the
+hinge posture wants them (duo-posture). Through the backlights (bl_power) and KWin's input devices like duo-posture,
+never DPMS. The sensor: iio-sensor-proxy (monitor-sensor --proximity, a claim held only during the call).
 Call volume: during a call the speaker sink's volume (slider, volume keys) is the call volume; it starts at the last
 call's volume (/var/lib/duo/call-volume) and the media volume comes back after the call.
 The codec must be routed to the earpiece a while before the voice start (else the downlink stays deaf until a
@@ -56,6 +60,12 @@ for (const w of ws) {
     }
 }
 '''
+# darken the screens and switch their touch off while the face is near the earpiece in a call
+PROXIMITY = os.environ.get('DUO_CALL_PROXIMITY', '1') == '1'
+POSTURE_STATE = '/run/duo-posture.state'  # duo-posture: closed | single | dual
+NEAR_FLAG = '/run/duo-call-near'  # duo-posture keeps the screens dark while this exists
+PANELS = (('DSI-1', '/sys/class/backlight/ae94000.dsi.0', 'Touchscreen 045E:0C02'),
+          ('DSI-2', '/sys/class/backlight/ae96000.dsi.0', 'Touchscreen 045E:0C01'))
 RING_GRACE = 2.5  # keep ringing this long when the ringing Call object vanishes (a new one often follows)
 # speakerphone: RX7 digital volume at the default call volume (84 = 0 dB; HiFi music uses 104), its mic and mic level
 SPK_RX7_VOLUME = int(os.environ.get('DUO_CALL_SPK_VOLUME', '94'))
@@ -466,6 +476,124 @@ class CallAudio:
         log('speaker routed back')
 
 
+# --- proximity ---
+def kwin_touch(name, enabled):
+    """Enable/disable KWin's input device(s) whose name contains name (the session user's bus, as duo-posture)."""
+    tree = as_user(['busctl', '--user', '--list', 'tree', 'org.kde.KWin']) or ''
+    for path in re.findall(r'/org/kde/KWin/InputDevice/\S+', tree):
+        n = as_user(['busctl', '--user', 'get-property', 'org.kde.KWin', path, 'org.kde.KWin.InputDevice', 'name'])
+        if n and name in n:
+            as_user(['busctl', '--user', 'set-property', 'org.kde.KWin', path, 'org.kde.KWin.InputDevice', 'enabled',
+                     'b', 'true' if enabled else 'false'])
+
+
+def bl_power(path, value):
+    try:
+        with open(path + '/bl_power', 'w') as f:
+            f.write(str(value))
+        return True
+    except OSError:  # EIO while the system has the screens off (DPMS)
+        return False
+
+
+class Proximity:
+    """monitor-sensor --proximity while a call is on the earpiece: near -> screens dark + touch off, far -> back."""
+    NEAR = re.compile(rb'near: (\d)|[Pp]roximity value changed: (\d)')
+
+    def __init__(self):
+        self.proc = None
+        self.buf = b''
+        self.near = False
+        self.next_try = 0.0  # monitor-sensor missing or ending at once: not again for 5 s
+
+    def fileno(self):
+        return self.proc.stdout.fileno()
+
+    @property
+    def active(self):
+        return self.proc is not None
+
+    def start(self):
+        if self.proc or not PROXIMITY or time.monotonic() < self.next_try:
+            return
+        self.next_try = time.monotonic() + 5.0
+        cmd = ['monitor-sensor', '--proximity']
+        if shutil.which('stdbuf'):  # monitor-sensor's g_print is block-buffered into a pipe
+            cmd = ['stdbuf', '-oL'] + cmd
+        try:
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        except OSError as e:
+            log('proximity: %s' % e)
+            return
+        log('proximity sensor on')
+
+    def stop(self):
+        if self.proc:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+            self.proc, self.buf = None, b''
+            log('proximity sensor off')
+        self.set_near(False)
+
+    def read(self):
+        data = os.read(self.fileno(), 4096)
+        if not data:  # monitor-sensor ended (iio-sensor-proxy restart?): the main loop starts it again
+            self.proc.wait()
+            self.proc, self.buf = None, b''
+            self.set_near(False)
+            return
+        self.buf += data
+        *lines, self.buf = self.buf.split(b'\n')
+        for line in lines:
+            m = self.NEAR.search(line)
+            if m:
+                self.set_near((m.group(1) or m.group(2)) == b'1')
+
+    def set_near(self, near):
+        if near == self.near:
+            return
+        self.near = near
+        if near:
+            open(NEAR_FLAG, 'w').close()
+            for _, bl, touch in PANELS:
+                bl_power(bl, 4)
+                kwin_touch(touch, False)
+            log('proximity near: screens dark, touch off')
+            return
+        try:
+            os.unlink(NEAR_FLAG)
+        except OSError:
+            pass
+        try:
+            posture = open(POSTURE_STATE).read().strip()
+        except OSError:
+            posture = 'dual'
+        on = {'closed': (), 'single': ('DSI-2',)}.get(posture, ('DSI-1', 'DSI-2'))
+        if on and os.path.exists('/usr/libexec/duo/duo-wake'):  # the system may have turned them off meanwhile
+            try:
+                subprocess.run(['/usr/libexec/duo/duo-wake', '--force', 'proximity far'], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        for name, bl, touch in PANELS:
+            if name in on:
+                bl_power(bl, 0)
+                kwin_touch(touch, True)
+        if on and os.path.exists('/usr/libexec/duo/duo-wake'):
+            # a cheek on the glass while the touch went off: clear KWin's touch state as after a screen-on (duo-wake
+            # waits until no finger is down); the screens came back through the backlight, not a DPMS change
+            try:
+                subprocess.Popen(['/usr/libexec/duo/duo-wake', '--touch-reset'], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+            except OSError:
+                pass
+        log('proximity far: screens back (posture %s)' % posture)
+
+
 # --- ringing ---
 class Ringer:
     """Ringtone loop (as the session's user, PipeWire's default sink), vibration loop and one screen wake."""
@@ -562,7 +690,7 @@ def monitor():
 
 
 def main():
-    ca, ringer, stop, dw = CallAudio(), Ringer(), [], DialerWatch()
+    ca, ringer, stop, dw, prox = CallAudio(), Ringer(), [], DialerWatch(), Proximity()
     signal.signal(signal.SIGTERM, lambda *x: stop.append(1))
     signal.signal(signal.SIGINT, lambda *x: stop.append(1))
     try:
@@ -576,7 +704,7 @@ def main():
         # periodic check of the call list, in case a signal was missed
         period = 1.0 if mon is None or ringer.on else (5.0 if ca.mode != 'idle' else 30.0)
         timeout = min(period, 0.5) if ca.mode == 'voice' else period  # in a call: follow the volume
-        watch = [dw] if dw.ensure() else []
+        watch = ([dw] if dw.ensure() else []) + ([prox] if prox.active else [])
         ready = select.select(watch + ([mon.stdout] if mon is not None else []), [], [], timeout)[0]
         if dw in ready:
             for member, value in dw.read():
@@ -588,6 +716,8 @@ def main():
                     # the dialer's second press (it only ever sends true): switch it off through the daemon
                     log('%s button pressed again: off' % ('speaker' if member == 'setSpeakerMode' else 'mute'))
                     dialer_set(member, False)
+        if prox in ready:
+            prox.read()
         if mon is not None and mon.stdout in ready:
             # read the whole burst of signals of one change (raw reads: select sees no buffered lines) before acting
             while True:
@@ -634,7 +764,13 @@ def main():
                 idle_since = now
         else:
             idle_since = None
+        # the proximity sensor only for a call on the earpiece (speaker on or the call over: screens back)
+        if ca.mode == 'voice' and not ca.speaker:
+            prox.start()
+        elif prox.active or prox.near:
+            prox.stop()
     ringer.stop()
+    prox.stop()
     if ca.mode != 'idle':
         ca.restore()
     if mon is not None:

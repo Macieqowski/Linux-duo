@@ -1,0 +1,39 @@
+From af49ca0090a92bc8d09e5f282478bea22ebe08e2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 14:14:52 +0000
+Subject: [PATCH] ASoC: codecs: wcd934x: fix the ADC MUX8 register field
+
+ADC MUX8 sits in bits 5:4 of CDC_TX_INP_MUX_ADC_MUX0_CFG1 (the vendor
+tavil driver declares tx_adc_mux8 there), but the enum points at the
+same bits of ADC_MUX1_CFG1, the field of ADC MUX10. Two things go wrong:
+the "ADC MUX8" control never reaches its own field, and
+wcd934x_codec_set_tx_mux() finds no case for (ADC_MUX1_CFG1, shift 4),
+so bit 7 of CDC_TX8_TX_PATH_CFG0 (AMIC/DMIC select) is never set and
+DEC8 decimates a digital microphone in AMIC mode.
+
+On the Surface Duo the same digital microphone recorded through DEC7 and
+DEC8 at once (correlation 0.99) came out 22.5 dB lower on DEC8 at equal
+DEC volume.
+
+Point the enum at ADC_MUX0_CFG1 bits 5:4, which wcd934x_codec_set_tx_mux()
+already maps to CDC_TX8_TX_PATH_CFG0.
+---
+ sound/soc/codecs/wcd934x.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sound/soc/codecs/wcd934x.c b/sound/soc/codecs/wcd934x.c
+index 3fe277a25..36fa2a6ba 100644
+--- a/sound/soc/codecs/wcd934x.c
++++ b/sound/soc/codecs/wcd934x.c
+@@ -1034,7 +1034,7 @@ static const struct soc_enum tx_adc_mux7_enum =
+ 	SOC_ENUM_SINGLE(WCD934X_CDC_TX_INP_MUX_ADC_MUX3_CFG1, 2,
+ 			ARRAY_SIZE(adc_mux_text), adc_mux_text);
+ static const struct soc_enum tx_adc_mux8_enum =
+-	SOC_ENUM_SINGLE(WCD934X_CDC_TX_INP_MUX_ADC_MUX1_CFG1, 4,
++	SOC_ENUM_SINGLE(WCD934X_CDC_TX_INP_MUX_ADC_MUX0_CFG1, 4,
+ 			ARRAY_SIZE(adc_mux_text), adc_mux_text);
+ 
+ static const struct soc_enum rx_int0_1_interp_mux_enum =
+-- 
+2.43.0
+

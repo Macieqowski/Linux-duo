@@ -25,7 +25,7 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`, [dzwonek z wibracją i budzeniem ekranu](#dzwonek-wibracja-i-budzenie-ekranu), głośnik i wyciszenie (sprawdzone; ikony przycisków w dialerze się nie zmieniają), głośność rozmowy. Bez tłumienia echa |
 | Głośnik, mikrofony | działa | WCD9340 + WSA8815, strojenie z ACDB telefonu. Na 7.3.5 głośnik milczał: [naprawione trasą w DT](#głośnik-cisza-na-735) |
 | Słuchawka do rozmów | działa | wyjście EAR kodeka (`0076`–`0079`); w rozmowie gra przez DSP ([dźwięk rozmowy](#dźwięk-rozmowy-q6voice)), [ciszej niż głośnik](#słuchawka-do-rozmów-wyjście-ear) |
-| Czujniki, zawias, obrót | działa | SLPI + hexagonrpcd + libssc (budowane w obrazie) |
+| Czujniki, zawias, obrót | działa | SLPI + hexagonrpcd + libssc (budowane w obrazie); [co działa w aplikacjach](#czujniki) |
 | Aparat | częściowo | wymaga modułu imx351 zbudowanego z danych Twojego telefonu |
 | Ładowanie, bateria | działa | qcom_smbx (SMB5) + 2x bq27742 |
 | Usypianie | wyłączone | s2idle działa, ale telefon się nie budził; na razie bez usypiania |
@@ -185,10 +185,8 @@ głosowe), śledzi połączenia w ModemManagerze i:
 W rozmowie usługa bierze mikrofon u dołu prawej połówki (`DMIC MUX7` = `DMIC1`, ten sam co Android) z `DEC7 Volume` 98
 (+14 dB, najlepszy z poziomów 66–114 w dwóch rozmowach testowych). `DMIC2` to mikrofon u góry lewej połówki. `DMIC3`
 czyta drugą krawędź tej samej linii danych co `DMIC2`, więc daje ten sam mikrofon (korelacja 0,99), a `DMIC0`, `DMIC4`
-i `DMIC5` dają cyfrowe zero (wcześniejszy komentarz w UCM „DMIC1 nie jest podłączony” był błędny). Profil HiFi w UCM
-(`DMIC3` + `DMIC2`) nagrywa więc na razie dwa razy górny mikrofon. W nagraniu HiFi kanał z `DEC7` wychodzi ok. 20 dB
-głośniej niż z `DEC8` przy tym samym ustawieniu (ten sam mikrofon na `DMIC3` i `DMIC2`), więc poziomów z nagrania nie
-da się przenieść wprost na rozmowę.
+i `DMIC5` dają cyfrowe zero (wcześniejszy komentarz w UCM „DMIC1 nie jest podłączony” był błędny). Nagrywanie poza
+rozmową: [mikrofony](#mikrofony-nagrywanie-i-dec8).
 
 Kodek trzeba przełączyć na słuchawkę chwilę przed startem toru głosowego. Gdy przełączenie było tuż przed startem
 (w `dmesg`: `overflow error on RX port 0`), słuchawka milczała aż do ponownego otwarcia PCM, przy dowolnym odstępie
@@ -231,8 +229,44 @@ może słyszeć siebie. Sprawdzone w rozmowie 2026-11-20: Głośnik włącza i w
 Wyciszenie wycisza i włącza mikrofon. W pierwszej rozmowie testowej nie działał żaden dotyk
 ([zacięty gest w KWin](#dotyk-przestaje-działać-zacięty-gest-w-kwin)).
 
-Do zrobienia: tłumienie echa i szumów, VoLTE, drugi kanał mikrofonu w UCM na `DMIC1` zamiast `DMIC3`. Dzwonek i
-wibracja: [niżej](#dzwonek-wibracja-i-budzenie-ekranu).
+Czujnik zbliżeniowy: w rozmowie na słuchawce (nie na głośniku) twarz przy czujniku obok słuchawki gasi oba ekrany i
+wyłącza ich dotyk, jak w Androidzie, więc policzek nie naciska przycisków rozmowy. Po odsunięciu telefonu ekrany
+wracają tak, jak każe zawias (`duo-posture`: oba, sam prawy albo żaden przy zamkniętym). `duo-call-audio` gasi je
+podświetleniem (`bl_power`) i urządzeniami wejścia KWin, tak jak `duo-posture`, nigdy przez DPMS. Czujnik czyta
+`monitor-sensor --proximity` (iio-sensor-proxy) tylko w czasie rozmowy. Póki twarz jest przy czujniku, istnieje
+`/run/duo-call-near` i `duo-posture` przy zmianie ułożenia tylko zapamiętuje stan. Po odsunięciu usługa prosi też
+`duo-wake --touch-reset` o wyczyszczenie stanu dotyku w KWin (policzek mógł dotykać ekranu, gdy dotyk się wyłączał;
+patrz [zacięty gest](#dotyk-przestaje-działać-zacięty-gest-w-kwin)). Wyłączenie: `DUO_CALL_PROXIMITY=0`. Test w
+rozmowie: w toku.
+
+Do zrobienia: tłumienie echa i szumów, VoLTE. Dzwonek i wibracja: [niżej](#dzwonek-wibracja-i-budzenie-ekranu).
+
+## Mikrofony: nagrywanie i DEC8
+
+Profil HiFi w UCM nagrywa dwa kanały: lewy z `DMIC1` (dół prawej połówki, ten sam co w rozmowie) przez `DEC7`, prawy z
+`DMIC2` (góra lewej połówki) przez `DEC8`. Wcześniej brał `DMIC3` + `DMIC2`, czyli dwa razy ten sam górny mikrofon.
+
+Kanał `DEC8` był o 20 dB cichszy przez błąd w sterowniku kodeka (także w czystym 7.3.5). Kontrolka `ADC MUX8` wskazuje
+w `wcd934x.c` pole rejestru `ADC MUX10` (`ADC_MUX1_CFG1` zamiast `ADC_MUX0_CFG1`, jak w sterowniku dostawcy). Przez to
+bit 7 rejestru `CDC_TX8_TX_PATH_CFG0` (wybór mikrofonu analogowego albo cyfrowego) nigdy nie jest ustawiany i `DEC8`
+przetwarza mikrofon cyfrowy w trybie analogowym. Pomiar 2026-11-20: ten sam mikrofon na `DEC7` i `DEC8` naraz
+(`arecord`, S16, korelacja 0,99) dał na `DEC8` 22,5 dB mniej. Patch `0085` poprawia pole. Wejdzie z następnym obrazem
+jądra; do tego czasu `DEC8` nagrywa ciszej.
+
+W trybie cyfrowym dekymator jest „gorący”: przy `DEC Volume` 84 (0 dB) cichy pokój dawał -53 dBFS, a ton 1500 Hz z
+głośnika telefonu się przesterowywał. Przy 62 ton był czysty (-21 dBFS przy tle -73 dBFS), przy 72 też (-11 dBFS).
+UCM ustawia więc oba kanały na 72 (-12 dB). Na rozmowę to nie wpływa, bo `duo-call-audio` ustawia `DEC7` po swojemu.
+
+Uszkodzony kanał po ponownym otwarciu strumienia: 2026-11-20 o 14:52 PipeWire otworzył nagrywanie na nowo (w `dmesg`
+„underflow error on TX port 7” tuż przed startem) i od tej chwili kanał `DEC7` dawał sam szum z przesterowaniem: ton z
+głośnika był tylko 11 dB nad tłem, a na `DEC8` 51 dB. To ten sam port, którego używa mikrofon w rozmowie. Przełączenie
+profilu karty na `off` i z powrotem na `HiFi` (`pactl set-card-profile alsa_card.platform-sound off`, potem `HiFi`)
+naprawiło kanał (ton czysty, 52 dB nad tłem). Przyczyna jest jeszcze nieznana. Gdyby w rozmowie zamiast głosu był
+szum, pomoże to samo przełączenie profilu.
+
+`pactl suspend-source` nie zwalnia mikrofonu, bo plasmashell (plasma-pa) cały czas trzyma na nim i na monitorze
+głośnika strumienie mierników głośności („PlasmaPA-VolumeMeter”). Przez to nagrywanie i odtwarzanie przez PipeWire
+działa bez przerwy, także przy wygaszonych ekranach, co kosztuje baterię. Do zbadania.
 
 ## Dzwonek, wibracja i budzenie ekranu
 
@@ -335,6 +369,34 @@ ekran: stały współczynnik (`ae96000.dsi.0=0.95`) albo krzywa `współczynnik@
 ekranu bez korekty, liniowo pomiędzy punktami, poza nimi stała). Usługa czyta plik przy każdej zmianie jasności.
 Obraz systemu tego pliku nie tworzy. Wcześniejsza krzywa `0.86@400,0.64@160` była zmierzona, gdy KWin jeszcze
 przyciemniał prawy ekran, i jest nieaktualna.
+
+Automatyczna jasność przy wygaszonych ekranach: gdy system wyłączył ekrany (bezczynność, przycisk zasilania,
+zamknięty telefon), sterownik podświetlenia DSI odrzuca zapis jasności (`EINVAL`). `duo-autobrightness` pisał przez
+`open().write()`, więc błąd wychodził dopiero przy zamykaniu pliku, poza obsługą błędów (w dzienniku 421 razy
+„OSError: [Errno 22] Invalid argument” od 12:01 do 14:52 2026-11-20), a usługa uznawała wartość za zapisaną.
+Po włączeniu ekranów jasność zostawała więc stara aż do następnej dużej zmiany światła, a różnica między zapisaną a
+prawdziwą wartością mogła wyglądać jak ruch suwaka i wstrzymać automatykę. Teraz odrzucony zapis nie liczy się jako
+zapisany, a usługa ponawia go co 2 s, aż ekran go przyjmie.
+
+## Czujniki
+
+Czujniki siedzą za procesorem czujników SLPI (Qualcomm SSC): SLPI -> FastRPC -> `hexagonrpcd` -> libssc 0.4.4 ->
+iio-sensor-proxy 3.9. Sprawdzone na telefonie 2026-11-20 (`ssccli`, `monitor-sensor`, `duo-hinge <typ>`):
+
+| Czujnik | Do aplikacji (iio-sensor-proxy) | Uwagi |
+|---|---|---|
+| Akcelerometr (LSM6DSO) | tak, orientacja ekranu | macierz montażu z `81-duo-ssc.rules`; KWin: tryb tabletu włączony, `autoRotation` „InTabletMode” na obu ekranach, wtyczka QtSensors `iio-sensor-proxy` jest. Obracanie z telefonem w ręku: niesprawdzone na 7.3.5 |
+| Światło (TXC PA22A) | tak | automatyczna jasność obu ekranów (`duo-autobrightness`) |
+| Zbliżeniowy (TXC PA22A) | tak | gaszenie ekranów przy uchu w rozmowie (`duo-call-audio`) |
+| Kompas | tak (kierunek) | libssc liczy kierunek z wektora obrotu SSC (`rotv`), nie z surowego magnetometru |
+| Kąt zawiasu, ułożenie | nie (brak typu w iio-sensor-proxy) | `duo-posture` przez `duo-hinge hinge_angle` |
+| Żyroskop, magnetometr (AK0991x), grawitacja, wektory obrotu, temperatura | nie | `duo-hinge gyro`, `mag`, `gravity`, `rotv`, `game_rv`, `geomag_rv`, `sensor_temperature` |
+| Hall, krokomierz, przechylenie, wykrywanie ruchu | nie | zdarzenia tylko przy zmianie (`hall`, `pedometer`, `tilt`, `psmd`) |
+
+Surowy magnetometr ma ok. 390 µT, ok. 8 razy więcej niż pole Ziemi (bez kalibracji, przesunięcie od magnesów i
+metalu), ale kompas z niego bezpośrednio nie korzysta. `mag_cal` i `gyro_cal` otwierają się, lecz bez kalibracji w
+ruchu nie wysyłają danych. `sig_motion` (`sns_smd`) wywraca libssc (asercja w `sensor_open`), więc go nie otwieraj.
+Poza SSC Linux widzi tylko przetworniki ADC w PMIC-ach (temperatury, napięcia), żadnych innych czujników IIO.
 
 ## Wibracje: reset telefonu przy „sile wibracji”
 

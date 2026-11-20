@@ -11,7 +11,8 @@
 # root's). The hinge angle: duo-hinge (libssc). Hysteresis 10/20 and 330/310 deg. Off: touch /etc/duo/posture-off
 # Opening: when the system has already turned the screens off (DPMS: idle or the power key), the backlight write fails
 # (I/O error) - duo-wake wakes them first (2026-11-20). The posture is kept in /run/duo-posture.state for duo-wake
-# (no wake at calls/notifications while closed).
+# (no wake at calls/notifications while closed). While /run/duo-call-near exists (duo-call-audio: a call, the face at
+# the earpiece) only the state is kept.
 H=/usr/libexec/duo/duo-hinge
 WAKE=/usr/libexec/duo/duo-wake
 STATE=/run/duo-posture.state
@@ -41,6 +42,9 @@ panel() { [ -w "$1/bl_power" ] && echo "$2" > "$1/bl_power"; }   # 0 = on, 4 = o
 
 apply() {
 	echo "$1" > "$STATE"
+	# in a call with the face at the earpiece (duo-call-audio, proximity) the screens stay dark; it lights them as
+	# this state says when the face goes away
+	if [ -e /run/duo-call-near ] && [ "$1" != closed ]; then log "posture $1 (hinge $2 deg), kept dark: call, proximity near"; return; fi
 	case $1 in single|dual) [ -x "$WAKE" ] && "$WAKE" --force "posture $1" >> "$LOG" 2>&1 ;; esac
 	case $1 in
 	closed) panel $BL1 4; panel $BL2 4; touch_set "$LEFT" false; touch_set "$RIGHT" false ;;
