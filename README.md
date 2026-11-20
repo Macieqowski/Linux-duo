@@ -17,7 +17,7 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | Funkcja | Stan w linuxduobench | Uwagi |
 |---|---|---|
 | Oba ekrany | działa | własny sterownik panelu, DSC |
-| Dotyk (multi-touch) | działa | spi-hid-duo + iptsd (budowany w obrazie); obejście [zacinającego się gestu w KWin](#dotyk-przestaje-działać-zacięty-gest-w-kwin) |
+| Dotyk (multi-touch) | działa | spi-hid-duo + iptsd (budowany w obrazie); korekcja brzegów przez [„Kalibrację dotyku”](#dotyk-przesunięcie-przy-brzegach-i-kalibracja-dotyku); obejście [zacinającego się gestu w KWin](#dotyk-przestaje-działać-zacięty-gest-w-kwin) |
 | Pióro | nie | jest w danych iptsd, nieskończone |
 | GPU (Adreno 640) | działa | Mesa freedreno/turnip z backports |
 | Wi-Fi, Bluetooth | działa | ath10k / hci_qca |
@@ -400,11 +400,44 @@ jego poprawioną kopię przez uinput: „Duo Touchscreen 045E:0C0x”. Kopia dos
 zawsze trafiają w krawędzie. `duo-posture` i `duo-call-audio` szukają urządzeń po „Touchscreen 045E:0C0x”, więc
 wyłączają też kopie. Gdy usługa stoi, dotyk działa jak wcześniej, bez korekcji.
 
+KWin 6.3 (`src/backends/libinput/device.cpp`) ma tu dwie pułapki:
+- Dla urządzenia bez wpisu w `~/.config/kcminputrc` ustawia pusty `OutputName` zamiast ekranu z udev. W pierwszej
+  próbie obie kopie nie miały przez to ekranu.
+- Bez wpisu `CalibrationMatrix` przepuszcza domyślną macierz libinput przez swój zapis i odczyt. Getter wypisuje
+  macierz 4×4 kolumnami, a setter i `kcminputrc` czytają ją wierszami. Wychodzi macierz transponowana, bez
+  przesunięć, i dotyk ląduje nad ekranem.
+
+Dlatego `duo-touch-fix` przejmuje ekran iptsd dopiero wtedy, gdy KWin ma kopię na tym samym ekranie. Najpierw ustawia
+kopii przez D-Bus KWin (`org.kde.KWin.InputDevice`, jako użytkownik sesji) `outputName`, macierz przepisaną z
+urządzenia iptsd (z powrotem transponowaną) i `enabled`. KWin zapisuje je w `kcminputrc`. Do tego czasu działa
+urządzenie iptsd, bez korekcji. Obraz od razu ma w `kcminputrc` wpisy dla obu kopii (`duo-debian-setup.sh`).
+
 Korekcję mierzy aplikacja „Kalibracja dotyku” (`duo-touch-calib`, GTK4 przez gjs, na liście aplikacji). Na obu
 ekranach pokazuje po kolei 13 krzyżyków (6 % od krawędzi, ćwiartki, środek), a pomyłki dalej niż 80 px od celu i
 podwójne stuknięcia odrzuca. Na czas pomiaru prosi `duo-touch-fix` o dotyk bez korekcji. Potem pokazuje błąd
 i przyciski: „Zapisz” (od razu działa i zostaje w `/etc/duo/touch-calibration.json`), „Bez korekcji”, „Jeszcze raz”.
 Po zapisie ekran służy do sprawdzenia: każde dotknięcie rysuje krzyżyk tam, gdzie widzi je system.
+
+Wynik na telefonie 2026-11-20 (19:44–19:53):
+- **Przypisanie ekranów:** obie kopie dostały w KWin właściwy ekran (0C01 → DSI-2, 0C02 → DSI-1), z macierzą taką
+  samą jak urządzenia iptsd. Po ponownym uruchomieniu usługi KWin wziął je od razu z `kcminputrc`.
+- **Kalibracja, oś pozioma:** krzyżyk 6 % od bocznej krawędzi był odczytywany przy ok. 1,1 %, a 94 % przy ok.
+  99,05 %. Tak było na obu ekranach i powtarzalnie (DSI-1 zmierzony dwa razy: 1,07 i 1,08 %).
+- **Kalibracja, oś pionowa:** na DSI-1 góra 4,1–4,9 %, dół 99,1 %. DSI-2 był mierzony w oknie zmaksymalizowanym
+  między paskami (529×648 zamiast 529×706), bo KWin nie dał mu pełnego ekranu. Oś pozioma jest tam dobra, a pion
+  przeliczony na ekran (okno 22 px od góry): krzyżyk przy 8,6 % odczytany przy 9,4 %, przy 89,4 % odczytany
+  przy 90,2 %.
+- **Środek ekranu:** w granicach ok. 1 %.
+- **Średni błąd bez korekcji** (piksele logiczne, ekran 529×706): DSI-1 22–23 px (najwyżej 45), DSI-2 17 px
+  (najwyżej 29).
+
+Od tej pory aplikacja mierzy tylko w oknie na cały ekran. Co 1,5 s ponawia prośbę o pełny ekran, a po 9 s bez niego
+nie mierzy i prosi o „Jeszcze raz”.
+
+W pierwszym pomiarze błąd przy bokach był mniejszy (20–38 px). Brzegi powtarzają się co do 0,01 %, więc to raczej
+właściwość digitizera i iptsd (pozycja przy samym brzegu się „przykleja”) niż niecelne stuknięcia. Skrajny pas 6 % ma
+przez to stromą mapę: odczyty 0–1,1 % rozkładają się na 0–6 % ekranu. Po zapisie Maciej ocenił „chyba działa”.
+Usługa `duo-touch-fix` jest włączona na stałe, a kalibracja zostaje w `/etc/duo/touch-calibration.json`.
 
 ## Jasność: lewy ekran jaśniejszy
 

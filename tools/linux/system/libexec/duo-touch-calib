@@ -79,7 +79,7 @@ function screenWindow(monitor) {
     overlay.add_overlay(label);
     overlay.add_overlay(box);
     win.set_child(overlay);
-    // phases: wait (window not yet full screen), measure, result, test
+    // phases: wait (window not yet full screen), nofull (gave up waiting), measure, result, test
     const st = {phase: 'wait', i: 0, taps: [], dots: [], lastUp: 0, miss: false, result: null};
     const say = t => label.set_markup('<span size="large" foreground="white">' + t + '</span>');
     const full = () => Math.abs(area.get_width() - geo.width) <= 2 && Math.abs(area.get_height() - geo.height) <= 2;
@@ -104,6 +104,12 @@ function screenWindow(monitor) {
     }
     function finish() {
         const w = area.get_width(), h = area.get_height();
+        if (!full()) {  // the window changed size while measuring: its fractions are not the screen's
+            st.phase = 'nofull';
+            endMeasure();
+            notFull();
+            return;
+        }
         const r = {screen: name, width: w, height: h, taps: st.taps, x: pairs(st.taps, 'x', w), y: pairs(st.taps, 'y', h)};
         const err = st.taps.map(p => Math.hypot(p.x - p.tx, p.y - p.ty));
         r.mean_err_px = +(err.reduce((a, b) => a + b, 0) / err.length).toFixed(1);
@@ -137,7 +143,7 @@ function screenWindow(monitor) {
         const r = fix({cmd: 'reset', screens: [name]});
         test(r && r.ok ? 'Korekcja usunięta.' : 'Nie udało się usunąć korekcji.');
     });
-    bAgain.connect('clicked', () => { bSave.visible = bReset.visible = true; start(); });
+    bAgain.connect('clicked', () => { bSave.visible = bReset.visible = true; whenFull(); });
     bClose.connect('clicked', () => win.close());
 
     area.set_draw_func((a, cr, w, h) => {
@@ -200,24 +206,48 @@ function screenWindow(monitor) {
             app.quit();
         return false;
     });
+    function notFull() {
+        const size = `${area.get_width()}x${area.get_height()}`;
+        printerr(`${name}: window ${size}, screen ${geo.width}x${geo.height}: not measuring`);
+        say(`${name}: okno nie zajmuje całego ekranu (${size} zamiast ${geo.width}x${geo.height}),\n` +
+            'pomiar byłby błędny. Naciśnij „Jeszcze raz”.');
+        bSave.visible = bReset.visible = false;
+        box.visible = true;
+        area.queue_draw();
+    }
+    // measure only once the window covers the whole screen. KWin (Plasma Mobile) may first keep it maximized between
+    // the panels: then the taps would be measured in the window's fractions, not the screen's (DSI-2 2026-11-20:
+    // 529x648 of 529x706). Full screen is asked again every 1.5 s; after 9 s without it, no measurement.
+    function whenFull() {
+        st.phase = 'wait';
+        box.visible = false;
+        say(`${name}: chwila...`);
+        area.queue_draw();
+        let waited = 0;
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+            if (st.phase !== 'wait')
+                return GLib.SOURCE_REMOVE;
+            if (full()) {
+                start();
+                return GLib.SOURCE_REMOVE;
+            }
+            waited += 100;
+            if (waited % 1500 === 0) {
+                win.unfullscreen();
+                win.fullscreen_on_monitor(monitor);
+            }
+            if (waited >= 9000) {
+                st.phase = 'nofull';
+                notFull();
+                return GLib.SOURCE_REMOVE;
+            }
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
     open++;
-    say(`${name}: chwila...`);
     win.present();
     win.fullscreen_on_monitor(monitor);
-    // measure only once the window covers the whole screen (KWin may first place it between the panels)
-    let waited = 0;
-    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
-        waited += 100;
-        if (st.phase !== 'wait')
-            return GLib.SOURCE_REMOVE;
-        if (full() || waited >= 4000) {
-            if (!full())
-                printerr(`${name}: window ${area.get_width()}x${area.get_height()}, screen ${geo.width}x${geo.height}`);
-            start();
-            return GLib.SOURCE_REMOVE;
-        }
-        return GLib.SOURCE_CONTINUE;
-    });
+    whenFull();
 }
 
 app.connect('activate', () => {
