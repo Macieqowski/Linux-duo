@@ -22,7 +22,7 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | GPU (Adreno 640) | działa | Mesa freedreno/turnip z backports |
 | Wi-Fi, Bluetooth | działa | ath10k / hci_qca |
 | Dane komórkowe (LTE) | działa | modem + IPA v4.1 + ModemManager |
-| **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`, [dzwonek z wibracją i budzeniem ekranu](#dzwonek-wibracja-i-budzenie-ekranu). Bez głośnomówiącego |
+| **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`, [dzwonek z wibracją i budzeniem ekranu](#dzwonek-wibracja-i-budzenie-ekranu), głośnik, wyciszenie i głośność rozmowy (test w toku). Bez tłumienia echa |
 | Głośnik, mikrofony | działa | WCD9340 + WSA8815, strojenie z ACDB telefonu. Na 7.3.5 głośnik milczał: [naprawione trasą w DT](#głośnik-cisza-na-735) |
 | Słuchawka do rozmów | działa | wyjście EAR kodeka (`0076`–`0079`); w rozmowie gra przez DSP ([dźwięk rozmowy](#dźwięk-rozmowy-q6voice)), [ciszej niż głośnik](#słuchawka-do-rozmów-wyjście-ear) |
 | Czujniki, zawias, obrót | działa | SLPI + hexagonrpcd + libssc (budowane w obrazie) |
@@ -177,7 +177,8 @@ nie znajduje w UCM profilu do rozmów. Usługa ładuje moduły q6voice (karta d�
 głosowe), śledzi połączenia w ModemManagerze i:
 
 - przy dzwonieniu (przychodzącym albo wybieraniu numeru) dokłada w kodeku tor słuchawki, tor głośnika zostaje (dzwonek);
-- przy odebraniu, a przy wychodzącym już przy sygnale dzwonienia, wyłącza tor głośnika i od razu otwiera PCM głosowy;
+- przy odebraniu, a przy wychodzącym już przy sygnale dzwonienia, wycisza tor głośnika (`RX7` na -84 dB, trasa
+  zostaje dla trybu głośnomówiącego) i od razu otwiera PCM głosowy;
 - po rozłączeniu zamyka PCM i przywraca głośnik. Pierwszy obiekt połączenia przychodzącego w ModemManagerze często
   znika po 1–3 s i pojawia się nowy, dlatego usługa czeka 6 s, zanim uzna nieodebrane połączenie za skończone.
 
@@ -202,9 +203,28 @@ diagnostycznej: `/lib/modules/$(uname -r)/updates/q6voice` (po `depmod`) i `/etc
 z `options q6voice cvs_unmute=1 tx_topo_override=0x10f70` oraz `options q6cvp fix_rx_map=1`. Jądro z tego repo
 tego nie potrzebuje.
 
-Do zrobienia: przełączanie na głośnik (tryb głośnomówiący), głośność rozmowy z suwaka, tłumienie echa i szumów,
-VoLTE, drugi kanał mikrofonu w UCM na `DMIC1` zamiast `DMIC3`. Dzwonek i wibracja:
-[niżej](#dzwonek-wibracja-i-budzenie-ekranu).
+Przyciski rozmowy w Plasma Dialer: dialer wysyła je do `callaudiod`, który nie ma profilu rozmowy dla tej karty.
+`duo-call-audio` śledzi więc sygnały `speakerModeChanged` i `muteChanged` usługi `org.kde.telephony.DialerUtils`
+(kde-telephony-daemon, szyna sesji) i sam ustawia kodek:
+
+- Głośnik: w rozmowie obie trasy zostają podłączone (słuchawka `RX INT0`, głośnik `RX INT7` -> `SpkrLeft`), a
+  przełączenie zmienia tylko głośności cyfrowe (`RX0`/`RX7 Digital Volume`, 0 = -84 dB). Zmiana trasy przy otwartym
+  PCM głosowym mogłaby wyciszyć tor do ponownego otwarcia, zmiana głośności nie. Gdyby mimo to tor milkł,
+  `DUO_CALL_SWITCH_REOPEN=1` otwiera PCM głosowy ponownie po przełączeniu (ok. 3 s przerwy).
+- Wyciszenie: `DEC7 Volume` na minimum.
+- Głośność: w rozmowie głośność sinka głośnika (suwak, klawisze głośności) jest głośnością rozmowy. Rozmowa zaczyna
+  się z głośnością poprzedniej (`/var/lib/duo/call-volume`, domyślnie 80 %), a po rozmowie wraca głośność
+  multimediów. 80 % daje słuchawce `RX0` 84 (0 dB), a głośnikowi `RX7` 94 (+10 dB); zależność jest sześcienna jak w
+  PipeWire (100 % = +6 dB, 50 % = -12 dB).
+- Każda rozmowa zaczyna się na słuchawce i z włączonym mikrofonem: po rozmowie usługa wyłącza oba przyciski w
+  dialerze.
+
+Ustawienia (`/etc/default/duo-call-audio`): `DUO_CALL_SPK_VOLUME`, `DUO_CALL_SPK_DMIC`, `DUO_CALL_SPK_MIC_VOLUME`,
+`DUO_CALL_VOLUME`, `DUO_CALL_SWITCH_REOPEN`. Echo nie jest tłumione (topologia `NONE`), więc na głośniku rozmówca
+może słyszeć siebie. Test na telefonie: w toku.
+
+Do zrobienia: tłumienie echa i szumów, VoLTE, drugi kanał mikrofonu w UCM na `DMIC1` zamiast `DMIC3`. Dzwonek i
+wibracja: [niżej](#dzwonek-wibracja-i-budzenie-ekranu).
 
 ## Dzwonek, wibracja i budzenie ekranu
 

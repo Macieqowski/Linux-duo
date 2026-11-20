@@ -5,15 +5,21 @@
 Holding the q6voice VoiceMMode1 PCM open in both directions starts the ADSP voice path (mics -> vocproc -> modem ->
 vocproc -> earpiece); no audio data passes through it. ModemManager has no audio policy, so this daemon follows its
 calls: ringing-in/dialing -> add the earpiece path on the codec (speaker kept for the ringtone); active (and
-ringing-out) -> drop the speaker path, open and start the voice PCM; no call left -> close it, restore the speaker.
+ringing-out) -> the speaker path to -84 dB, open and start the voice PCM; no call left -> close it, restore the speaker.
 While an incoming call rings (and no other call is up) it also plays the ringtone in a loop, vibrates (hfd-service)
 and wakes the screens (duo-wake): the dialer itself only plays its notification sound once and neither vibrates nor
 wakes the screens.
+Speaker and mute follow Plasma Dialer's buttons (kde-telephony-daemon's org.kde.telephony.DialerUtils signals
+speakerModeChanged / muteChanged on the session bus; callaudiod, which the dialer also asks, has no call profile for
+this card): speaker = the loudspeaker path (RX INT7) instead of the earpiece (RX INT0) and the speakerphone mic, mute =
+DEC7 at its minimum. Every call starts on the earpiece, unmuted (both buttons are reset at the end of a call).
+Call volume: during a call the speaker sink's volume (slider, volume keys) is the call volume; it starts at the last
+call's volume (/var/lib/duo/call-volume) and the media volume comes back after the call.
 The codec must be routed to the earpiece a while before the voice start (else the downlink stays deaf until a
 re-open), routes change only with PipeWire's sink/source suspended, the TX topology is NONE (SM_ECNS needs ACDB
 calibration). Settings: /etc/default/duo-call-audio (DUO_CALL_* environment variables below).
 """
-import ctypes, os, pwd, re, select, shutil, signal, subprocess, sys, time
+import ctypes, json, math, os, pwd, re, select, shutil, signal, subprocess, sys, time
 
 CARD = os.environ.get('DUO_CALL_CARD', 'SurfaceDuo')
 VOICE_PCM = os.environ.get('DUO_CALL_PCM', 'VoiceMMode1')
@@ -34,6 +40,15 @@ RINGTONE = os.environ.get('DUO_CALL_RINGTONE', '/usr/share/sounds/ocean/stereo/p
 VIBRATE = os.environ.get('DUO_CALL_VIBRATE', '1') == '1'
 WAKE = os.environ.get('DUO_CALL_WAKE', '1') == '1'
 RING_GRACE = 2.5  # keep ringing this long when the ringing Call object vanishes (a new one often follows)
+# speakerphone: RX7 digital volume at the default call volume (84 = 0 dB; HiFi music uses 104), its mic and mic level
+SPK_RX7_VOLUME = int(os.environ.get('DUO_CALL_SPK_VOLUME', '94'))
+SPK_DMIC = os.environ.get('DUO_CALL_SPK_DMIC', 'DMIC1')
+SPK_MIC_VOLUME = os.environ.get('DUO_CALL_SPK_MIC_VOLUME', '') or MIC_VOLUME
+# 1 = close and reopen the voice PCM after an earpiece <-> speaker switch (if the switch leaves the path silent)
+SWITCH_REOPEN = os.environ.get('DUO_CALL_SWITCH_REOPEN', '0') == '1'
+# call volume (%, as the sink volume shows it) at which the earpiece/speaker get the levels above; cubic like PipeWire
+CALL_VOLUME_DEFAULT = int(os.environ.get('DUO_CALL_VOLUME', '80'))
+VOLUME_FILE = '/var/lib/duo/call-volume'
 TX_TOPOLOGY_NONE = 0x10F70
 UNANSWERED_GRACE = 6.0  # the first incoming Call object often vanishes 1-3 s after ringing; a new one follows
 
@@ -100,6 +115,94 @@ def suspend(on):
             p.wait(timeout=5)
         except subprocess.TimeoutExpired:
             p.kill()
+
+
+def user_env(u):
+    return {'XDG_RUNTIME_DIR': '/run/user/%d' % u.pw_uid, 'PATH': '/usr/bin:/bin', 'HOME': u.pw_dir,
+            'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/%d/bus' % u.pw_uid}
+
+
+def as_user(args, timeout=5):
+    """Run a command as the session's user; its stdout, or None."""
+    u = session_user()
+    if not u:
+        return None
+    try:
+        r = subprocess.run(args, user=u.pw_uid, group=u.pw_gid, env=user_env(u), capture_output=True, text=True,
+                           timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def sink_volume():
+    out = as_user(['pactl', 'get-sink-volume', SINK]) or ''
+    m = re.search(r'(\d+)%', out)
+    return int(m.group(1)) if m else None
+
+
+def set_sink_volume(pct):
+    as_user(['pactl', 'set-sink-volume', SINK, '%d%%' % pct])
+
+
+def level(base, pct):
+    """Codec digital volume (1 dB steps, 84 = 0 dB) for the call volume pct: base at CALL_VOLUME_DEFAULT, cubic."""
+    if pct <= 0:
+        return 0
+    return max(0, min(124, base + round(60 * math.log10(pct / CALL_VOLUME_DEFAULT))))
+
+
+def dialer_reset():
+    """Speaker and mute buttons off again (the next call starts on the earpiece, unmuted)."""
+    for method in ('setSpeakerMode', 'setMute'):
+        as_user(['busctl', '--user', 'call', 'org.kde.telephony.DialerUtils', '/org/kde/telephony/DialerUtils/tel/mm',
+                 'org.kde.telephony.DialerUtils', method, 'b', 'false'])
+
+
+class DialerWatch:
+    """speakerModeChanged / muteChanged of kde-telephony-daemon (session bus) as a pipe of JSON lines"""
+    def __init__(self):
+        self.proc, self.buf, self.next_try = None, b'', 0.0
+
+    def fileno(self):
+        return self.proc.stdout.fileno()
+
+    def ensure(self):
+        if self.proc and self.proc.poll() is None:
+            return True
+        if time.monotonic() < self.next_try:
+            return False
+        self.next_try = time.monotonic() + 10
+        u = session_user()
+        if not u or not os.path.exists('/run/user/%d/bus' % u.pw_uid):
+            self.proc = None
+            return False
+        self.proc = subprocess.Popen(['busctl', '--user', 'monitor', '--json=short', '--match',
+                                      "type='signal',interface='org.kde.telephony.DialerUtils'"],
+                                     user=u.pw_uid, group=u.pw_gid, env=user_env(u), stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, bufsize=0)
+        self.buf = b''
+        return True
+
+    def read(self):
+        """[(member, bool)] from what is waiting on the pipe"""
+        data = os.read(self.fileno(), 65536)
+        if not data:
+            self.proc.wait()
+            self.proc = None
+            return []
+        self.buf += data
+        *lines, self.buf = self.buf.split(b'\n')
+        out = []
+        for line in lines:
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            d = (m.get('payload') or {}).get('data') or []
+            if m.get('member') in ('speakerModeChanged', 'muteChanged') and d and isinstance(d[0], bool):
+                out.append((m['member'], d[0]))
+        return out
 
 
 # --- voice PCM ---
@@ -179,7 +282,7 @@ class VoicePcm:
 
 # --- routing ---
 SAVED_CONTROLS = ['RX INT0_1 MIX1 INP0', 'RX INT0 DEM MUX', 'RX INT7_1 MIX1 INP0', 'EAR PA Volume',
-                  'RX0 Digital Volume', 'DEC7 Volume', 'DMIC MUX7']
+                  'RX0 Digital Volume', 'RX7 Digital Volume', 'DEC7 Volume', 'DMIC MUX7']
 
 
 class CallAudio:
@@ -187,23 +290,78 @@ class CallAudio:
         self.pcm = VoicePcm()
         self.mode = 'idle'  # idle | pre | voice
         self.saved = {}
+        self.speaker = False  # the dialer's Speaker button
+        self.muted = False  # its Mute button
+        self.out = None  # in voice mode: 'spk' or 'ear' as routed
+        self.media_volume = None
+        try:
+            self.volume = max(1, min(150, int(open(VOLUME_FILE).read().strip())))
+        except (OSError, ValueError):
+            self.volume = CALL_VOLUME_DEFAULT
+
+    def mic_pairs(self, speaker):
+        dmic, vol = (SPK_DMIC, SPK_MIC_VOLUME) if speaker else (CALL_DMIC, MIC_VOLUME)
+        pairs = [('DMIC MUX7', dmic)] if dmic else []
+        if self.muted:
+            pairs.append(('DEC7 Volume', 0))
+        elif vol:
+            pairs.append(('DEC7 Volume', int(vol)))
+        else:
+            dec7 = self.saved.get('DEC7 Volume')
+            if dec7 and dec7.lstrip('-').isdigit():
+                pairs.append(('DEC7 Volume', min(int(dec7) + MIC_BOOST_DB, 124)))
+        return pairs
+
+    def out_pairs(self, speaker):
+        """Both paths stay routed during a call (earpiece RX INT0, loudspeaker RX INT7 -> SpkrLeft as the HiFi profile
+        set it up); the switch only moves the digital volumes (0 = -84 dB = off). A route change while the voice PCM
+        runs could leave the path silent until a re-open, a volume change cannot."""
+        ear = level(EAR_RX0_VOLUME, self.volume) if not speaker else 0
+        spk = level(SPK_RX7_VOLUME, self.volume) if speaker else 0
+        return [('RX INT0_1 MIX1 INP0', 'RX0'), ('RX INT7_1 MIX1 INP0', 'RX0'),
+                ('RX0 Digital Volume', ear), ('RX7 Digital Volume', spk)]
+
+    def set_speaker(self, on):
+        self.speaker = on
+        want = 'spk' if on else 'ear'
+        if self.mode != 'voice' or self.out == want:
+            log('speaker %s (applied when the call is up)' % ('on' if on else 'off'))
+            return
+        suspend(True)
+        cset(self.out_pairs(on) + self.mic_pairs(on))
+        suspend(False)
+        self.out = want
+        if SWITCH_REOPEN:
+            self.pcm.close()
+            time.sleep(2.5)
+            self.pcm.open()
+        log('in-call output: %s' % ('speaker' if on else 'earpiece'))
+
+    def set_mute(self, on):
+        self.muted = on
+        if self.mode != 'idle':
+            cset([p for p in self.mic_pairs(self.out == 'spk') if p[0] == 'DEC7 Volume'])
+        log('microphone %s' % ('muted' if on else 'on'))
+
+    def follow_volume(self):
+        """the sink volume is the call volume while the voice path is up"""
+        v = sink_volume()
+        if v is None or v == self.volume:
+            return
+        self.volume = v
+        cset([p for p in self.out_pairs(self.out == 'spk') if p[0] == ('RX7 Digital Volume' if self.out == 'spk'
+                                                                        else 'RX0 Digital Volume')])
+        log('call volume %d %%' % v)
 
     def preroute(self):
         """Earpiece path on, speaker path kept (a ringtone may be playing): done while the call still rings."""
         suspend(True)
         self.saved = cget(SAVED_CONTROLS)
-        dec7 = self.saved.get('DEC7 Volume')
         pairs = [('SLIMBUS_0_RX Voice Mixer %s' % VOICE_PCM, 1), ('%s Capture Mixer SLIMBUS_0_TX' % VOICE_PCM, 1),
                  ('%s TX Topology' % VOICE_PCM, TX_TOPOLOGY_NONE),
                  ('RX INT0_1 MIX1 INP0', 'RX0'), ('RX INT0 DEM MUX', 'CLSH_DSM_OUT'),
-                 ('EAR PA Volume', EAR_PA), ('RX0 Digital Volume', EAR_RX0_VOLUME)]
-        if CALL_DMIC:
-            pairs.append(('DMIC MUX7', CALL_DMIC))
-        if MIC_VOLUME:
-            pairs.append(('DEC7 Volume', int(MIC_VOLUME)))
-        elif dec7 and dec7.lstrip('-').isdigit() and MIC_BOOST_DB:
-            pairs.append(('DEC7 Volume', min(int(dec7) + MIC_BOOST_DB, 124)))
-        cset(pairs)
+                 ('EAR PA Volume', EAR_PA), ('RX0 Digital Volume', level(EAR_RX0_VOLUME, self.volume))]
+        cset(pairs + self.mic_pairs(False))
         suspend(False)
         self.pre_time = time.monotonic()
         self.mode = 'pre'
@@ -215,16 +373,35 @@ class CallAudio:
         # the codec needs a moment between the earpiece switch and the voice start (else the downlink stays deaf)
         wait = 2.5 - (time.monotonic() - self.pre_time)
         suspend(True)
-        cset([('RX INT7_1 MIX1 INP0', 'ZERO')])
+        # both paths stay routed (the loudspeaker one is on for the ringtone); the unused one goes to -84 dB
+        cset(self.out_pairs(self.speaker) + self.mic_pairs(self.speaker))
         if wait > 0:
             time.sleep(wait)
         if self.pcm.open():
             self.mode = 'voice'
+            self.out = 'spk' if self.speaker else 'ear'
+            if self.media_volume is None:  # the slider shows the call volume during the call
+                self.media_volume = sink_volume()
+                if self.media_volume is not None:
+                    set_sink_volume(self.volume)
             return True
         return False
 
     def restore(self):
         self.pcm.close()
+        if self.media_volume is not None:  # the media volume back, the call volume kept for the next call
+            set_sink_volume(self.media_volume)
+            self.media_volume = None
+            try:
+                os.makedirs(os.path.dirname(VOLUME_FILE), exist_ok=True)
+                with open(VOLUME_FILE, 'w') as f:
+                    f.write('%d\n' % self.volume)
+            except OSError:
+                pass
+        if self.speaker or self.muted:
+            dialer_reset()
+        self.speaker = self.muted = False
+        self.out = None
         suspend(True)
         pairs = [('SLIMBUS_0_RX Voice Mixer %s' % VOICE_PCM, 0), ('%s Capture Mixer SLIMBUS_0_TX' % VOICE_PCM, 0)]
         for name in SAVED_CONTROLS:
@@ -334,7 +511,7 @@ def monitor():
 
 
 def main():
-    ca, ringer, stop = CallAudio(), Ringer(), []
+    ca, ringer, stop, dw = CallAudio(), Ringer(), [], DialerWatch()
     signal.signal(signal.SIGTERM, lambda *x: stop.append(1))
     signal.signal(signal.SIGINT, lambda *x: stop.append(1))
     try:
@@ -342,14 +519,21 @@ def main():
     except FileNotFoundError:
         mon = None
         log('gdbus not found: polling ModemManager every second')
-    calls, idle_since, refresh, retry_at, buf = {}, None, True, 0.0, b''
+    calls, idle_since, refresh, retry_at, buf, listed = {}, None, True, 0.0, b'', 0.0
     log('watching calls (voice path at ringing-out: %s)' % OPEN_ON_RINGING_OUT)
     while not stop:
-        timeout = 1.0 if mon is None or ringer.on else (5.0 if ca.mode != 'idle' else 30.0)
-        if mon is None:
-            time.sleep(timeout)
-            refresh = True
-        elif select.select([mon.stdout], [], [], timeout)[0]:
+        # periodic check of the call list, in case a signal was missed
+        period = 1.0 if mon is None or ringer.on else (5.0 if ca.mode != 'idle' else 30.0)
+        timeout = min(period, 0.5) if ca.mode == 'voice' else period  # in a call: follow the volume
+        watch = [dw] if dw.ensure() else []
+        ready = select.select(watch + ([mon.stdout] if mon is not None else []), [], [], timeout)[0]
+        if dw in ready:
+            for member, value in dw.read():
+                if member == 'speakerModeChanged':
+                    ca.set_speaker(value)
+                else:
+                    ca.set_mute(value)
+        if mon is not None and mon.stdout in ready:
             # read the whole burst of signals of one change (raw reads: select sees no buffered lines) before acting
             while True:
                 data = os.read(mon.stdout.fileno(), 65536)
@@ -364,10 +548,12 @@ def main():
                     refresh = handle(line.decode(errors='replace'), calls) or refresh
                 if not select.select([mon.stdout], [], [], 0.05)[0]:
                     break
-        else:
-            refresh = True  # periodic check, in case a signal was missed
+        if time.monotonic() - listed >= period:
+            refresh = True
         if refresh:
-            calls, refresh = list_calls(), False
+            calls, refresh, listed = list_calls(), False, time.monotonic()
+        if ca.mode == 'voice':
+            ca.follow_volume()
         want, now = wanted(calls), time.monotonic()
         if ringer.on and not ringing(calls):  # answered or another call up: at once; gone: after a grace
             if want == 'voice' or {st for st, _ in calls.values()} & {ACTIVE, HELD, DIALING, RINGING_OUT}:

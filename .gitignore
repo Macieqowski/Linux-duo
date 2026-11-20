@@ -3,3 +3,4 @@ out/
 *.tar.zst
 *.cpio.gz
 debian-trixie.gpg
+__pycache__/
