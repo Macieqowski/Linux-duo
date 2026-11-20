@@ -220,13 +220,19 @@ podmienia tylko ten jeden zasób w kopii programu: znajduje skompresowany blok (
 kompresuje go z powrotem i wpisuje w to samo miejsce (nowy blok nie może być dłuższy od starego). Reszta programu się
 nie zmienia. Obraz systemu robi to przy budowaniu (`--install`, oryginał w `/var/lib/duo/plasma-dialer.orig`), a hak apt
 `99-duo-dialer-patch` powtarza to po aktualizacji pakietu. Na telefonie (Plasma Dialer 1:6.3.5-1): blok 1799 -> 1781
-bajtów, dialer startuje bez błędów z `CallPage.qml`. Napis „Mute” zostaje ten sam, bo dialer go nie zmienia. Działanie
-przycisków w rozmowie: w trakcie sprawdzania.
+bajtów. Napis „Mute” zostaje ten sam, bo dialer go nie zmienia. Pierwsza próba nie zadziałała: dialer dalej używał
+starej strony z pamięci podręcznej QML (`~/.cache/KDE/dialer/qmlcache`). Qt sprawdza ją dla plików qrc tylko po dacie
+zasobu, a poprawka tej daty nie zmienia. `--install` kasuje więc tę pamięć we wszystkich katalogach domowych. Na
+telefonie przeniesiona ręcznie 2026-11-20 o 17:52; sprawdzenie w rozmowie: w toku.
 
-Wyciszenie w rozmowie testowej 2026-11-20 o 17:07: po włączeniu i wyłączeniu głośnika żadne naciśnięcie Mute nie
-dotarło do dialera (bez podświetlenia, bez wywołania `setMute`), choć czerwony przycisk rozłączenia działał. Zablokowanie
-KWin, dialera albo iio-sensor-proxy przez czujnik zbliżeniowy lub światła sprawdzone i wykluczone (odpowiedzi poniżej
-55 ms przy uruchamianiu `monitor-sensor`). Przyczyna w trakcie badania (zapis dotyku i okien w następnej rozmowie).
+Wyciszenie nie działało (rozmowy testowe 2026-11-20 o 17:07 i 17:46). Zapis dotyku, okien i D-Bus z drugiej rozmowy:
+dotknięcia trafiały w przycisk Mute aktywnego okna dialera, a dialer za każdym razem wysyłał `setMute(true)`.
+kde-telephony-daemon miał jednak wyciszenie zapamiętane jako włączone (od restartów telefonu), więc nic się nie
+zmieniało: bez `muteChanged` i bez `MuteMic`, a `duo-call-audio` reaguje na sygnał. Głośnik działał, bo jego stan w
+demonie był wyłączony. Poprawka w `duo-call-audio`: oba przyciski są ustawiane na wyłączone w demonie na początku
+(`preroute`) i zawsze na końcu rozmowy, a 0,4 s po każdym naciśnięciu usługa czyta stan demona (`mute`,
+`speakerMode`) i idzie za nim, gdy sygnał nie przyszedł (w dzienniku „following the daemon”). Blokowanie KWin, dialera
+albo iio-sensor-proxy przez czujniki sprawdzone wcześniej i wykluczone (odpowiedzi poniżej 55 ms).
 
 - Głośnik: w rozmowie obie trasy zostają podłączone (słuchawka `RX INT0`, głośnik `RX INT7` -> `SpkrLeft`), a
   przełączenie zmienia tylko głośności cyfrowe (`RX0`/`RX7 Digital Volume`, 0 = -84 dB). Zmiana trasy przy otwartym

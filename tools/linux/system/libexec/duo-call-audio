@@ -15,7 +15,10 @@ this card): speaker = the loudspeaker path (RX INT7) instead of the earpiece (RX
 DEC7 at its minimum. Every call starts on the earpiece, unmuted (both buttons are reset at the end of a call).
 Plasma Dialer 6.3's call page cannot read the buttons' state back (CallPage.qml: "Cannot assign [undefined] to bool"),
 so every press sends setSpeakerMode(true) / setMute(true), never false; a true while that state is already on is
-therefore taken as the second press: this daemon sends the false to kde-telephony-daemon itself.
+therefore taken as the second press: this daemon sends the false to kde-telephony-daemon itself. The daemon only
+signals a change, so a state left on in it (2026-11-20: mute stayed true there after a reboot) swallowed every Mute
+press. Both buttons are therefore set off in the daemon at the start and at the end of every call, and 0.4 s after any
+button press this service reads the daemon's state and follows it, whether or not a signal came.
 When a call rings or comes up it also raises Plasma Dialer's window (a one-shot KWin script over D-Bus): a dialer
 already running in the background is otherwise kept behind by focus stealing prevention.
 Proximity: in a call on the earpiece (not the speaker), something near the proximity sensor by the earpiece (the face)
@@ -212,6 +215,13 @@ def dialer_reset():
     """Speaker and mute buttons off again (the next call starts on the earpiece, unmuted)."""
     for method in ('setSpeakerMode', 'setMute'):
         dialer_set(method, False)
+
+
+def dialer_get(method):
+    """kde-telephony-daemon's speakerMode / mute (True / False), None when it does not answer"""
+    out = as_user(['busctl', '--user', 'call', 'org.kde.telephony.DialerUtils', '/org/kde/telephony/DialerUtils/tel/mm',
+                   'org.kde.telephony.DialerUtils', method]) or ''
+    return {'b true': True, 'b false': False}.get(out.strip())
 
 
 class DialerWatch:
@@ -415,6 +425,7 @@ class CallAudio:
 
     def preroute(self):
         """Earpiece path on, speaker path kept (a ringtone may be playing): done while the call still rings."""
+        dialer_reset()  # the call starts on the earpiece, unmuted, in the daemon too (its signals set ours)
         suspend(True)
         self.saved = cget(SAVED_CONTROLS)
         pairs = [('SLIMBUS_0_RX Voice Mixer %s' % VOICE_PCM, 1), ('%s Capture Mixer SLIMBUS_0_TX' % VOICE_PCM, 1),
@@ -458,8 +469,7 @@ class CallAudio:
                     f.write('%d\n' % self.volume)
             except OSError:
                 pass
-        if self.speaker or self.muted:
-            dialer_reset()
+        dialer_reset()  # also when this service saw nothing on: the daemon may hold a stale state
         self.speaker = self.muted = False
         self.out = None
         suspend(True)
@@ -699,11 +709,14 @@ def main():
         mon = None
         log('gdbus not found: polling ModemManager every second')
     calls, idle_since, refresh, retry_at, buf, listed = {}, None, True, 0.0, b'', 0.0
+    sync_at = None  # after a Speaker/Mute press: compare with the daemon's state then
     log('watching calls (voice path at ringing-out: %s)' % OPEN_ON_RINGING_OUT)
     while not stop:
         # periodic check of the call list, in case a signal was missed
         period = 1.0 if mon is None or ringer.on else (5.0 if ca.mode != 'idle' else 30.0)
         timeout = min(period, 0.5) if ca.mode == 'voice' else period  # in a call: follow the volume
+        if sync_at is not None:
+            timeout = max(0.0, min(timeout, sync_at - time.monotonic()))
         watch = ([dw] if dw.ensure() else []) + ([prox] if prox.active else [])
         ready = select.select(watch + ([mon.stdout] if mon is not None else []), [], [], timeout)[0]
         if dw in ready:
@@ -716,6 +729,16 @@ def main():
                     # the dialer's second press (it only ever sends true): switch it off through the daemon
                     log('%s button pressed again: off' % ('speaker' if member == 'setSpeakerMode' else 'mute'))
                     dialer_set(member, False)
+                if member in ('setSpeakerMode', 'setMute'):
+                    sync_at = time.monotonic() + 0.4
+        if sync_at is not None and time.monotonic() >= sync_at:
+            # a press the daemon did not signal (it already held that state): follow the daemon's state
+            sync_at = None
+            for method, mine, apply in (('speakerMode', ca.speaker, ca.set_speaker), ('mute', ca.muted, ca.set_mute)):
+                v = dialer_get(method)
+                if v is not None and v != mine:
+                    log('%s: following the daemon (%s), no signal came' % (method, 'on' if v else 'off'))
+                    apply(v)
         if prox in ready:
             prox.read()
         if mon is not None and mon.stdout in ready:

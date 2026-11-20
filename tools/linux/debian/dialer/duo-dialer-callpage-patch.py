@@ -18,9 +18,12 @@ Exit 0 = patched (prints the sha256), 2 = already patched, 1 = not found / does 
 Or: duo-dialer-callpage-patch.py --install  (the image build and the apt hook 99-duo-dialer-patch: patches
 /usr/bin/plasma-dialer in place, the unpatched binary kept as /var/lib/duo/plasma-dialer.orig; exit 0 when patched now
 or already; a running dialer keeps the old page until it is started again).
+Qt's QML disk cache (~/.cache/KDE/dialer/qmlcache) checks a qrc file only by the resource's timestamp, which this
+patch keeps: on the phone the dialer went on running the old page from its cache (2026-11-20). Remove that cache after
+patching an installed system; --install does it for every home directory.
 Needs python3 and, for a zstd resource, the zstd command.
 """
-import hashlib, os, shutil, struct, subprocess, sys, tempfile, zlib
+import glob, hashlib, os, shutil, struct, subprocess, sys, tempfile, zlib
 
 MARK = "id: callPage"
 REPS = [
@@ -98,6 +101,8 @@ def install(binary="/usr/bin/plasma-dialer"):
     shutil.copy2(binary, "/var/lib/duo/plasma-dialer.orig")
     shutil.copymode(binary, tmp)
     os.replace(tmp, binary)
+    for cache in glob.glob("/home/*/.cache/KDE/dialer/qmlcache") + glob.glob("/root/.cache/KDE/dialer/qmlcache"):
+        shutil.rmtree(cache, ignore_errors=True)   # compiled from the old page, still "valid" by its timestamp
     return 0
 
 
