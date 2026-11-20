@@ -475,21 +475,52 @@ dotyku, który iptsd widzi do 4,5 linii od brzegu, liczy osobno dla każdej osi:
 1. **Profil od brzegu w głąb:** linie 1–7, bez skopiowanej skrajnej, suma 3 linii obok dotyku.
 2. **Wewnętrzne zbocze palca:** miejsce, gdzie sygnał spada do połowy szczytu. Ani kopia, ani bramkowana druga linia
    go nie zmieniają.
-3. **Środek palca:** zbocze minus półszerokość palca w połowie sygnału (mediana z nagrania: 1,06 kolumny,
-   1,12 wiersza).
-4. **Brzeg:** palec leżący tylko na linii przy brzegu liczy się jako dotyk brzegu. Pozycje pomiędzy są rozciągnięte
-   liniowo aż do półszerokości + 0,5 linii, jak w `StretchToBorder`.
-5. **Przejście:** od 3 do 4 linii pozycja przechodzi płynnie w pozycję iptsd.
+3. **Odległość od brzegu:** z położenia zbocza (`kh`). Pierwsza wersja liczyła zbocze minus półszerokość palca
+   i rozciągała pozycje liniowo do brzegu, jak `StretchToBorder`. Od wersji opisanej niżej `kh` zamienia na odległość
+   tablica zmierzona osobno dla każdej krawędzi z kalibracji. Bez kalibracji krawędzi zostaje model palca w kształcie
+   Gaussa o półszerokości 1,06 kolumny lub 1,12 wiersza (mediana z nagrania).
+4. **Przejście:** od 3 do 4 linii pozycja przechodzi płynnie w pozycję iptsd.
 
 Mapa z kalibracji działa dalej, już na tej pozycji. `{"cmd":"edge","on":false}` na `/run/duo-touch-fix.sock`
 wyłącza to do restartu usługi, a `{"cmd":"watch"}` pokazuje obliczenia na żywo.
 
-Sprawdzenie na nagraniu (1 linia = 4,4 mm w pionie i 4,3 mm w poziomie):
+Sprawdzenie pierwszej wersji na nagraniu (1 linia = 4,4 mm w pionie i 4,3 mm w poziomie):
 - **Stuknięcia ok. 1 cm od dolnej krawędzi lewego ekranu** (1 cm = 2,28 linii): iptsd 2,64–2,80 linii, nowe
   2,2–2,5.
 - **Stuknięcia ok. 5 mm od dołu prawego ekranu** (1,14 linii): iptsd 0,56–1,78 (duży rozrzut), nowe 1,28–1,48.
 - **Stuknięcia przy samym brzegu:** 0,1–0,3 linii, czyli 1–2 px.
 - **Przeciągnięcia za krawędź:** schodzą płynnie do 0, bez skoku przy włączaniu drugiej linii.
+
+### Brzegi: kalibracja każdej krawędzi osobno (2026-11-20, późny wieczór)
+
+Kalibracja z pierwszą wersją (13 krzyżyków, przy brzegach 6 %) pokazała dwa problemy.
+
+**Fałszywe dotknięcia w rogu.** Jądro nie przekazuje zdarzenia pozycji, które powtarza ostatnią wartość slotu. Gdy
+nowe stuknięcie zaczynało się tam, gdzie skończyło się poprzednie (przy brzegu iptsd daje wciąż tę samą nasyconą
+pozycję), `duo-touch-fix` nie dostawał pozycji i wysyłał dotyk z (0, 0), czyli w prawym dolnym rogu. Korekcja
+przesuwała go potem wzdłuż dolnej krawędzi. Na prawym ekranie takie dotknięcia przy dole otwierały pasek Plasma
+Mobile. Demon trzyma teraz ostatnią pozycję każdego slotu po końcu dotyku, tak jak jądro.
+
+**Każda krawędź reaguje inaczej.** Przy krzyżykach 6 % od krawędzi `kh` wynosiło 2,2–2,6 linii u góry, a 1,55–1,9 po
+prawej. Palec przy samym dolnym brzegu lewego ekranu dawał na nagraniu ok. 1,64, czyli prawie tyle, co krzyżyk 6 %
+po prawej. Jeden wzór dla wszystkich krawędzi przesuwał więc stuknięcia po bokach o 0,5–1 linii (2–4 mm) na zewnątrz.
+
+Kalibracja ma teraz 21 krzyżyków na ekran:
+- **Środek i punkty 25/75 %** dają mapę osi, jak wcześniej.
+- **Na środku każdej krawędzi** są krzyżyki 10 %, 6 %, 3 % i 1,5 % od niej. Po każdym stuknięciu aplikacja pyta
+  demona o pomiar tego dotyku (`{"cmd":"last","screen":...}`: mediana `kh` i profilu) i zapisuje go z celem.
+- **„Zapisz”** wysyła mapę i stuknięcia przy krawędziach (`"edges"` w `/etc/duo/touch-calibration.json`).
+
+Demon dla każdej krawędzi przelicza cel na odległość w liniach, przez macierz i odwrotność mapy. Potem układa tablicę
+`kh` → odległość: mediana `kh` dla każdej głębokości, rosnąco. Głębokości, których `kh` różni się o mniej niż 0,05
+linii, łączy w jeden punkt, bo czujnik ich nie rozróżnia. Poniżej najpłytszego punktu tablica schodzi do brzegu
+nachyleniem pierwszego odcinka, a powyżej najgłębszego rośnie z nachyleniem 1. Na żywo wynik jest lekko wygładzany
+(połowa nowej klatki).
+
+Podczas pomiaru demon trzyma każdy dotyk co najmniej 10 % od krawędzi ekranu (`{"cmd":"hold","margin":0.1}`, do
+zamknięcia połączenia). Dzięki temu stuknięcie 1,5 % od dołu prawego ekranu nie otwiera panelu. Dlatego krzyżyki przy
+krawędziach aplikacja sprawdza tylko wzdłuż krawędzi. Wynik pokazuje też, gdzie obecne obliczenie kładzie stuknięcia
+przy krawędziach.
 
 ## Jasność: lewy ekran jaśniejszy
 

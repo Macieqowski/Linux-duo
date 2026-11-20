@@ -22,22 +22,31 @@ Edges (2026-11-20): the digitizer's outermost heatmap line on every side is a co
 and iptsd's Gaussian fit then cannot get a finger closer than ~0.2 lines to the border: everything from ~6 % of the
 screen outwards reads ~1 %, which no per-axis map can undo. So the daemon also reads each digitizer's heatmap from its
 hidraw node (read-only, next to iptsd) and, for a contact within ~4 lines of a border, puts its own estimate in the
-place of iptsd's along that axis: the finger's inner flank (where the profile from the border inwards falls to half
-its peak; untouched by the copied border line and by the firmware gating the second line on and off) minus the
-finger's half-width. A finger lying only on the line next to the border is taken as touching the border, and the
-positions in between are stretched linearly onto it - what Android's Microsoft touch library does (StretchToBorder in
-libsurfacetouch.so). Further in it fades into iptsd's own position. {"cmd":"edge","on":false} switches it off until
-the daemon restarts; {"cmd":"watch"} streams the estimates.
+place of iptsd's along that axis, from kh: where the profile from the border inwards falls to half its peak on the
+finger's inner flank (untouched by the copied border line and by the firmware gating the second line on and off).
+Android's Microsoft touch library does the same kind of thing (StretchToBorder in libsurfacetouch.so: a finger's
+saturated position stretched onto the border by its size). How kh relates to the distance differs per border (the
+calibration taps of 2026-11-20 evening at the crosshairs 6 % from the edges: kh 2.2-2.6 at the top, 1.55-1.9 on the
+right side), so it is calibrated: duo-touch-calib has crosshairs at several depths from each
+border, asks the daemon for each tap's kh ({"cmd":"last"}) and saves the taps with the map ("edges"); per border the
+daemon fits a monotone lookup (class Lut). Without that, a Gaussian finger model (edge_model). Further in it fades
+into iptsd's own position. {"cmd":"edge","on":false} switches it off until the daemon restarts; {"cmd":"watch"}
+streams the estimates; {"cmd":"hold","margin":0.1} keeps every output 10 % away from the screen edges while that
+connection is open (the calibration taps near the edges must not reach Plasma's edge gestures).
+Slots: the daemon keeps each slot's last position after the contact ends, as the kernel does (2026-11-20: a tap that
+started where the previous one ended got no position event and was sent as (0, 0), the bottom-right corner).
 
 The map comes from /etc/duo/touch-calibration.json, written through the socket by the calibration app
-(duo-touch-calib): per screen and output axis, pairs [measured, target] in the output's 0..1 coordinates, measured
-without correction ("raw" mode, which the app holds while it measures). The screen edges always map onto themselves.
-Socket /run/duo-touch-fix.sock, one JSON object per line: {"cmd":"raw"} (no correction while this connection is
-open, or until {"cmd":"normal"}), {"cmd":"save","screens":{"DSI-2":{"x":[[m,t],..],"y":[[m,t],..]}}} (merged per
-screen), {"cmd":"reset","screens":["DSI-2"]} (no correction for those screens; no list = all), {"cmd":"status"}.
+(duo-touch-calib): per screen and output axis, pairs [measured, target] in the output's 0..1 coordinates (the app
+measures through the current correction and undoes the map), plus the border taps ("edges"). The screen edges always
+map onto themselves.
+Socket /run/duo-touch-fix.sock, one JSON object per line: {"cmd":"raw"} (no map while this connection is open, or
+until {"cmd":"normal"}), {"cmd":"save","screens":{"DSI-2":{"x":[[m,t],..],"y":[[m,t],..],"edges":[..]}}} (per
+screen; without "edges" the screen keeps its border taps), {"cmd":"reset","screens":["DSI-2"]} (no correction for
+those screens; no list = all), {"cmd":"last","screen":"DSI-2"} (the last finished contact there), {"cmd":"status"}.
 Run as root (uinput, EVIOCGRAB): duo-touch-fix.service.
 """
-import fcntl, glob, json, os, pwd, re, select, socket, struct, subprocess, sys, time
+import fcntl, glob, json, os, pwd, re, select, socket, statistics, struct, subprocess, sys, time
 
 CONF = '/etc/duo/touch-calibration.json'
 SOCK = '/run/duo-touch-fix.sock'
@@ -55,9 +64,13 @@ EDGE = {
     'near': 4.5,  # only contacts that iptsd puts within this many lines of a border
     'blend': (3.0, 4.0),  # own estimate below, iptsd's above, linear in between (lines from the border)
     'r': {'col': 1.06, 'row': 1.12},  # finger half-width at half signal along each axis (lines; median, 2026-11-20)
-    'a': 0.5,  # the stretch ends at half-width + a lines from the border (Android: r + a)
     'min': 40,  # peak of the 3-line profile below this: no estimate
+    'ema': 0.5,  # weight of a new frame's estimate (per contact and border: less jitter)
+    'merge': 0.05,  # calibration: depths whose kh differ less than this are one knot
 }
+# the borders, by heatmap axis and side. With the Duo's matrix ("0 -1 1 -1 0 1") col0 = the screen's top,
+# col1 = its bottom, row0 = its right side, row1 = its left side
+KEYS = ('col0', 'col1', 'row0', 'row1')
 
 
 def _ioc(d, nr, size):
@@ -165,30 +178,72 @@ def hidraw_of(vid, pid):
     return None
 
 
-def edge_est(prof, u, r):
-    """distance of a contact from a border, in heatmap lines, from the profile prof[k] of the lines k = 1.. from the
-    border inwards (prof[0] unused: the border line only copies line 1); u = iptsd's distance. None: keep iptsd's"""
+def edge_feat(prof, u):
+    """the profile prof[k] of the lines k = 1.. from a border inwards (prof[0] unused: the border line only copies
+    line 1) of a contact iptsd puts u lines from that border -> (kh, peak): kh = where the profile falls to half its
+    peak on the inner flank (lines from the border). None: no usable profile"""
     top = min(len(prof) - 1, int(u + 3.5))  # the peak is this contact's: iptsd's distance is never too large
     a = max(prof[1:top + 1])
     if a < EDGE['min']:
         return None
     kp = prof.index(a, 1)
     h = a / 2.0
-    kh = None
     for i in range(kp, len(prof) - 1):
         if prof[i] >= h > prof[i + 1]:
-            kh = i + (prof[i] - h) / float(prof[i] - prof[i + 1])  # the inner flank at half the peak
-            break
-    if kh is None:
-        return None
-    d = kh - r
-    if abs(d - u) > 3.0:
-        return None
-    d0, t = 1.5 - r, r + EDGE['a']  # d0: the finger only on line 1 = at the border
-    out = t * (d - d0) / (t - d0) if d < t else d
-    b0, b1 = EDGE['blend']
-    w = min(1.0, max(0.0, (d - b0) / (b1 - b0)))
-    return max(0.0, (1.0 - w) * out + w * u)
+            return i + (prof[i] - h) / float(prof[i] - prof[i + 1]), a
+    return None
+
+
+def edge_model(kh, r):
+    """without calibration: the distance from the border (lines) of a Gaussian finger of half-width r whose profile
+    falls to half its peak at kh. Peak on line 1 (or the finger further out): (kh - c)^2 = (1 - c)^2 + r^2, so the
+    finger at the border has kh = sqrt(1 + r^2); peak further in: c = kh - r"""
+    if kh >= 1.0 + r:
+        return kh - r
+    return max(0.0, (kh * kh - 1.0 - r * r) / (2.0 * (kh - 1.0)))  # kh >= 1.5 here: line 2 is below half of line 1
+
+
+class Lut:
+    """one border's kh -> distance from the border (lines), from the calibration taps near it: knots [(kh, c)]
+    increasing in both, linear in between; below the first knot the first segment's slope, down to the border (0);
+    above the last, slope 1 (the finger's peak is inside, as in edge_model). One knot: edge_model shifted onto it"""
+
+    def __init__(self, knots, r):
+        self.k, self.r = knots, r
+        if len(knots) == 1:
+            self.shift = knots[0][1] - edge_model(knots[0][0], r)
+        else:
+            s = (knots[1][1] - knots[0][1]) / (knots[1][0] - knots[0][0])
+            self.s0 = min(4.0, max(0.3, s))
+
+    def __call__(self, kh):
+        k = self.k
+        if len(k) == 1:
+            return max(0.0, edge_model(kh, self.r) + self.shift)
+        if kh <= k[0][0]:
+            return max(0.0, k[0][1] + (kh - k[0][0]) * self.s0)
+        for (h0, c0), (h1, c1) in zip(k, k[1:]):
+            if kh <= h1:
+                return c0 + (kh - h0) * (c1 - c0) / (h1 - h0)
+        return k[-1][1] + (kh - k[-1][0])
+
+
+def fit_lut(pts, r):
+    """[(kh, c)] of the calibration taps near one border (c = the target's distance from it, lines) -> Lut or None.
+    Per target depth the median kh; kh has to grow with the depth, so neighbouring depths whose kh does not (or by
+    less than EDGE['merge']: no resolution there) are pooled into one knot, weighted by their taps"""
+    groups = {}
+    for kh, c in pts:
+        groups.setdefault(round(c, 2), []).append(kh)
+    pool = []  # [sum c, sum kh, n]
+    for c, khs in sorted(groups.items()):
+        n = len(khs)
+        pool.append([c * n, statistics.median(khs) * n, n])
+        while len(pool) > 1 and pool[-1][1] / pool[-1][2] < pool[-2][1] / pool[-2][2] + EDGE['merge']:
+            c2, k2, n2 = pool.pop()
+            pool[-1] = [pool[-1][0] + c2, pool[-1][1] + k2, pool[-1][2] + n2]
+    knots = [(k / n, c / n) for c, k, n in pool]
+    return Lut(knots, r) if knots else None
 
 
 class Heat:
@@ -259,6 +314,17 @@ class Map:
                 return t0 + (v - m0) * (t1 - t0) / (m1 - m0)
         return v
 
+    def inverse(self, v):
+        """the measured value that the map sends to v"""
+        p = self.pts
+        if v <= 0.0 or v >= 1.0:
+            return v
+        for i in range(1, len(p)):
+            if v <= p[i][1]:
+                (m0, t0), (m1, t1) = p[i - 1], p[i]
+                return m0 + (v - t0) * (m1 - m0) / (t1 - t0)
+        return v
+
     def identity(self):
         return len(self.pts) == 2
 
@@ -300,6 +366,11 @@ class Dev:
             log('%s: no heatmap (%s)' % (self.dst, e))
         self.edge = self.heat is not None
         self.watch = None  # callback for {"cmd":"watch"}
+        self.lut = {}  # border key -> Lut (calibrated), else edge_model
+        self.hold = 0.0  # {"cmd":"hold"}: outputs kept this fraction away from every screen edge
+        self.rec, self.ema, self.last, self.seq = {}, {}, None, 0  # per contact: frames, smoothed estimates; last one
+        # slot -> [tracking id, x, y]: kept after a contact ends, as the kernel keeps them (it drops a new contact's
+        # position event that repeats the slot's last value: a tap where the previous one ended has none)
         self.slot, self.fslot, self.slots, self.sent, self.frame = 0, None, {}, {}, []
         self.st = [self.abs.get(ABS_X, (0,))[0], self.abs.get(ABS_Y, (0,))[0]]  # the single-touch copy
         self.maxx = self.abs.get(ABS_MT_POSITION_X, (0, 0, 0))[2]
@@ -388,14 +459,19 @@ class Dev:
             self.slot = struct.unpack('6i', buf)[0]
         except OSError:
             return
-        gone = [s for s, v in self.slots.items() if v[0] != -1 and tid[s] == -1]
-        self.slots = {s: [tid[s], xs[s], ys[s]] for s in range(64) if tid[s] != -1}
+        gone = [s for s, v in self.slots.items() if v[0] != -1 and tid[s] != v[0]]
+        for s in gone:
+            self.summarize(s)
+        self.slots = {s: [tid[s], xs[s], ys[s]] for s in range(64)}
         self.frame, self.fslot, self.sent = [], None, {}
         out = []
-        for s in gone:  # ended while events were dropped
-            out += [(EV_ABS, ABS_MT_SLOT, s), (EV_ABS, ABS_MT_TRACKING_ID, -1)]
+        for s in gone:  # ended while events were dropped (a new contact's id below ends it as well)
+            if tid[s] == -1:
+                out += [(EV_ABS, ABS_MT_SLOT, s), (EV_ABS, ABS_MT_TRACKING_ID, -1)]
         for s, (t, x, y) in self.slots.items():
-            fx, fy = self.correct(x, y)
+            if t == -1:
+                continue
+            fx, fy = self.held(*self.correct(x, y))
             out += [(EV_ABS, ABS_MT_SLOT, s), (EV_ABS, ABS_MT_TRACKING_ID, t), (EV_ABS, ABS_MT_POSITION_X, fx),
                     (EV_ABS, ABS_MT_POSITION_Y, fy)]
             self.sent[s] = [fx, fy]
@@ -403,8 +479,10 @@ class Dev:
         self.emit(out)
 
     def set_maps(self, screen, raw):
-        """screen: {"x": pairs, "y": pairs} in output coordinates -> maps on this device's raw X / raw Y"""
+        """screen: {"x": pairs, "y": pairs, "edges": taps} in output coordinates -> maps on this device's raw X / raw Y
+        and the borders' lookups"""
         self.mx = self.my = Map()
+        self.lut = {}
         if raw or not screen:
             return
         try:
@@ -425,6 +503,40 @@ class Dev:
             pairs = [((m - r) / s, (t - r) / s) for m, t in screen.get(out, [])]
             maps[raw_axis] = Map(pairs)
         self.mx, self.my = maps.get('nx', Map()), maps.get('ny', Map())
+        self.lut = self.fit_edges(screen.get('edges') or [], (a, b, c, d, e, f))
+        if self.lut:
+            log('%s: borders calibrated: %s' % (self.dst, ', '.join(
+                '%s %s' % (k, ' '.join('%.2f>%.2f' % p for p in v.k)) for k, v in sorted(self.lut.items()))))
+
+    def fit_edges(self, taps, mat):
+        """calibration taps near the borders -> {key: Lut}. A tap: {"tx", "ty": the target in output 0..1, "edge":
+        {key: {"kh": ...}}} (the daemon's own summary of that touch, {"cmd":"last"}). The target goes back through
+        the matrix and the map to the raw position that ends up on it: its distance from that border, in lines"""
+        a, b, c, d, e, f = mat
+        det = a * e - b * d
+        if abs(det) < 1e-9:
+            return {}
+        nc, nr = HM_COLS - 1, HM_ROWS - 1
+        pts = {}
+        for tap in taps:
+            try:
+                tx, ty, edge = float(tap['tx']), float(tap['ty']), tap.get('edge') or {}
+                nx = self.mx.inverse((e * (tx - c) - b * (ty - f)) / det)
+                ny = self.my.inverse((a * (ty - f) - d * (tx - c)) / det)
+                for key, ft in edge.items():
+                    if key not in KEYS or not isinstance(ft, dict) or ft.get('kh') is None:
+                        continue
+                    pos = nc * (1.0 - nx) if key[:3] == 'col' else nr * ny
+                    n = nc if key[:3] == 'col' else nr
+                    pts.setdefault(key, []).append((float(ft['kh']), pos if key[3] == '0' else n - pos))
+            except (AttributeError, KeyError, TypeError, ValueError):
+                continue
+        out = {}
+        for key, p in pts.items():
+            lut = fit_lut([q for q in p if q[1] < EDGE['blend'][1] + 1.0], EDGE['r'][key[:3]])
+            if lut:
+                out[key] = lut
+        return out
 
     def fix(self, code, v):
         m = self.mx if code in (ABS_X, ABS_MT_POSITION_X) else self.my
@@ -435,40 +547,103 @@ class Dev:
             return v
         return int(round(lo + m((v - lo) / (hi - lo)) * (hi - lo)))
 
-    def edge_fix(self, x, y):
-        """iptsd's raw (x, y) with the position along each axis replaced near a border (see the docstring)"""
+    def edge_fix(self, x, y, slot=None):
+        """iptsd's raw (x, y) with the position along each axis replaced near a border (see the docstring); also
+        the features per border ({key: {...}}). slot: the contact's (smoothing, recording), None: a one-off"""
         sig = self.heat.signal() if self.edge and self.heat else None
         if sig is None or self.maxx <= 0 or self.maxy <= 0:
-            return x, y
+            return x, y, {}
         nc, nr = HM_COLS - 1, HM_ROWS - 1
         cf = nc * (1.0 - x / float(self.maxx))  # X grows towards column 0
         rf = nr * y / float(self.maxy)
-        nx, ny, info = x, y, []
-        # along the columns (the screen's top and bottom): profile over the rows next to the contact's
-        side, u = (0, cf) if cf <= nc - cf else (1, nc - cf)
-        if u < EDGE['near']:
-            rows = range(max(1, int(round(rf)) - 1), min(nr - 1, int(round(rf)) + 1) + 1)
-            prof = [0] + [sum(sig[j * HM_COLS + (k if side == 0 else nc - k)] for j in rows) for k in range(1, 8)]
-            d = edge_est(prof, u, EDGE['r']['col'])
-            if d is not None:
-                nx = int(round(self.maxx * (1.0 - (d if side == 0 else nc - d) / nc)))
-                info.append(('col', side, round(u, 2), round(d, 2)))
-        # along the rows (the screen's sides)
-        side, u = (0, rf) if rf <= nr - rf else (1, nr - rf)
-        if u < EDGE['near']:
-            cols = range(max(1, int(round(cf)) - 1), min(nc - 1, int(round(cf)) + 1) + 1)
-            prof = [0] + [sum(sig[(k if side == 0 else nr - k) * HM_COLS + j] for j in cols) for k in range(1, 8)]
-            d = edge_est(prof, u, EDGE['r']['row'])
-            if d is not None:
-                ny = int(round(self.maxy * (d if side == 0 else nr - d) / nr))
-                info.append(('row', side, round(u, 2), round(d, 2)))
-        if info and self.watch:
-            self.watch({'screen': self.output, 'x': x, 'y': y, 'nx': nx, 'ny': ny, 'edge': info})
-        return nx, ny
+        nx, ny, info, feat = x, y, [], {}
+        for axis, pos, n, perp, pn in (('col', cf, nc, rf, nr), ('row', rf, nr, cf, nc)):
+            side, u = (0, pos) if pos <= n - pos else (1, n - pos)
+            if u >= EDGE['near']:
+                continue
+            # the profile from the border inwards, summed over the 3 lines across it next to the contact
+            near = range(max(1, int(round(perp)) - 1), min(pn - 1, int(round(perp)) + 1) + 1)
+            if axis == 'col':  # along the columns: the screen's top and bottom
+                prof = [0] + [sum(sig[j * HM_COLS + (k if side == 0 else nc - k)] for j in near) for k in range(1, 8)]
+            else:  # along the rows: the screen's sides
+                prof = [0] + [sum(sig[(k if side == 0 else nr - k) * HM_COLS + j] for j in near) for k in range(1, 8)]
+            fe = edge_feat(prof, u)
+            if fe is None:
+                continue
+            kh, peak = fe
+            key = axis + str(side)
+            lut = self.lut.get(key)
+            c = lut(kh) if lut else edge_model(kh, EDGE['r'][axis])
+            if abs(c - u) > 3.0:
+                continue  # not this contact's profile
+            if slot is not None:
+                sm = self.ema.setdefault(slot, {})
+                if key in sm:
+                    c = sm[key] + EDGE['ema'] * (c - sm[key])
+                sm[key] = c
+            b0, b1 = EDGE['blend']
+            w = min(1.0, max(0.0, (c - b0) / (b1 - b0)))
+            dist = max(0.0, (1.0 - w) * c + w * u)
+            if axis == 'col':
+                nx = int(round(self.maxx * (1.0 - (dist if side == 0 else nc - dist) / nc)))
+            else:
+                ny = int(round(self.maxy * (dist if side == 0 else nr - dist) / nr))
+            feat[key] = {'u': round(u, 3), 'kh': round(kh, 3), 'a': peak, 'c': round(c, 3), 'p': prof[1:]}
+            info.append((key, round(u, 2), round(kh, 2), round(dist, 2)))
+        if info and self.watch and slot is not None:
+            self.watch({'screen': self.output, 'slot': slot, 'x': x, 'y': y, 'nx': nx, 'ny': ny, 'edge': info})
+        return nx, ny, feat
 
-    def correct(self, x, y):
-        x, y = self.edge_fix(x, y)
-        return self.fix(ABS_MT_POSITION_X, x), self.fix(ABS_MT_POSITION_Y, y)
+    def correct(self, x, y, slot=None):
+        """iptsd's raw (x, y) -> the corrected position (edges, then the map; not yet held)"""
+        ex, ey, feat = self.edge_fix(x, y, slot)
+        fx, fy = self.fix(ABS_MT_POSITION_X, ex), self.fix(ABS_MT_POSITION_Y, ey)
+        if slot is not None:
+            self.rec.setdefault(slot, []).append((x, y, fx, fy, feat))
+            del self.rec[slot][:-400]
+        return fx, fy
+
+    def held(self, fx, fy):
+        """{"cmd":"hold"}: the position kept self.hold (fraction) away from every edge (the matrix is axis-aligned)"""
+        if self.hold <= 0.0:
+            return fx, fy
+        out = []
+        for code, v in ((ABS_MT_POSITION_X, fx), (ABS_MT_POSITION_Y, fy)):
+            _, lo, hi, _, _, _ = self.abs[code]
+            m = self.hold * (hi - lo)
+            out.append(int(round(min(max(v, lo + m), hi - m))))
+        return tuple(out)
+
+    def screen_of(self, fx, fy):
+        """a position on this device -> the output's 0..1 coordinates (the matrix), or (None, None)"""
+        try:
+            a, b, c, d, e, f = (float(v) for v in self.matrix.split())
+            nx, ny = fx / float(self.maxx), fy / float(self.maxy)
+        except (ValueError, ZeroDivisionError):
+            return None, None
+        return round(a * nx + b * ny + c, 4), round(d * nx + e * ny + f, 4)
+
+    def summarize(self, slot):
+        """a contact ended: its medians become self.last ({"cmd":"last"}; the calibration app's taps)"""
+        rec = self.rec.pop(slot, [])
+        self.ema.pop(slot, None)
+        if not rec:
+            return
+        med = statistics.median
+        fx, fy = med([r[2] for r in rec]), med([r[3] for r in rec])
+        sx, sy = self.screen_of(fx, fy)
+        s = {'frames': len(rec), 'x': med([r[0] for r in rec]), 'y': med([r[1] for r in rec]), 'sx': sx, 'sy': sy,
+             'edge': {}}
+        for key in KEYS:
+            fs = [r[4][key] for r in rec if key in r[4]]
+            if fs:
+                s['edge'][key] = {'n': len(fs), 'u': round(med([q['u'] for q in fs]), 3),
+                                  'kh': round(med([q['kh'] for q in fs]), 3), 'a': med([q['a'] for q in fs]),
+                                  'c': round(med([q['c'] for q in fs]), 3),
+                                  'p': [med([q['p'][i] for q in fs]) for i in range(len(fs[0]['p']))]}
+        self.seq += 1
+        s['seq'] = self.seq
+        self.last = s
 
     def emit(self, events):
         if events and self.ui is not None:
@@ -496,12 +671,14 @@ class Dev:
                 self.st[code - ABS_X] = v
             elif code in (ABS_MT_TRACKING_ID, ABS_MT_POSITION_X, ABS_MT_POSITION_Y):
                 s = self.slots.setdefault(self.slot, [-1, 0, 0])
+                if code == ABS_MT_TRACKING_ID and s[0] != -1 and v != s[0]:
+                    self.summarize(self.slot)  # that contact ended (or another one took its slot)
                 s[(ABS_MT_TRACKING_ID, ABS_MT_POSITION_X, ABS_MT_POSITION_Y).index(code)] = v
 
     def flush(self):
         if self.heat:
             self.heat.drain()
-        fixed = {s: self.correct(x, y) for s, (t, x, y) in self.slots.items() if t != -1}
+        fixed = {s: self.held(*self.correct(x, y, s)) for s, (t, x, y) in self.slots.items() if t != -1}
         out, slot, st = [], self.fslot if self.fslot is not None else self.slot, None
         for t, code, v in self.frame:
             if t == EV_ABS:
@@ -513,9 +690,10 @@ class Dev:
                     i = 0 if code == ABS_MT_POSITION_X else 1
                     v = fixed[slot][i]
                     self.sent.setdefault(slot, [None, None])[i] = v
-                elif code in (ABS_X, ABS_Y):  # the single-touch copy of one contact: the pair, as the MT ones
+                elif code in (ABS_X, ABS_Y):  # the single-touch copy of one contact: the pair, as that contact's
                     if st is None:
-                        st = self.correct(*self.st)
+                        st = next((fixed[s] for s, (t2, x, y) in sorted(self.slots.items())
+                                   if s in fixed and [x, y] == self.st), None) or self.held(*self.correct(*self.st))
                     v = st[code - ABS_X]
             out.append((t, code, v))
         # contacts iptsd did not move this frame, but whose estimate did (iptsd stuck at the border)
@@ -527,8 +705,6 @@ class Dev:
                 moved = True
         if moved:
             out.append((EV_ABS, ABS_MT_SLOT, self.slot))
-        for s in [s for s, v in self.slots.items() if v[0] == -1]:
-            del self.slots[s]
         out.append((EV_SYN, SYN_REPORT, 0))
         self.emit(out)
         self.frame, self.fslot = [], None
@@ -615,6 +791,11 @@ def main():
     def raw():
         return any(c['raw'] for c in clients.values())
 
+    def apply_hold():
+        m = max([c['hold'] for c in clients.values()] + [0.0])
+        for d in devs:
+            d.hold = m
+
     def apply_maps():
         r = raw()
         for d in devs:
@@ -665,6 +846,7 @@ def main():
                     pending.remove(d)
                     devs.append(d)
                     d.set_maps(screens.get(d.output), raw())
+                    d.hold = max([c['hold'] for c in clients.values()] + [0.0])
                     log('%s now corrected (%s, edges %s)' % (d.dst, 'calibrated' if d.output in screens else
                                                               'no calibration', 'from ' + d.heat.path if d.heat else
                                                               'as iptsd has them: no heatmap'))
@@ -680,7 +862,7 @@ def main():
         for fd in ready:
             if fd is srv:
                 c, _ = srv.accept()
-                clients[c] = {'raw': False, 'watch': False, 'buf': b''}
+                clients[c] = {'raw': False, 'watch': False, 'hold': 0.0, 'buf': b''}
                 continue
             if fd in clients:
                 st = clients[fd]
@@ -694,6 +876,9 @@ def main():
                     if st['raw']:
                         apply_maps()
                         log('raw mode ended (client gone)')
+                    if st['hold']:
+                        apply_hold()
+                        log('hold ended (client gone)')
                     continue
                 st['buf'] += chunk
                 while b'\n' in st['buf']:
@@ -715,7 +900,11 @@ def main():
                     elif cmd == 'save' and isinstance(req.get('screens'), dict):
                         for k, v in req['screens'].items():
                             if isinstance(v, dict):
+                                old = screens.get(str(k), {})
                                 screens[str(k)] = {a: [[float(m), float(t)] for m, t in v.get(a, [])] for a in 'xy'}
+                                edges = v['edges'] if 'edges' in v else old.get('edges')
+                                if isinstance(edges, list) and edges:
+                                    screens[str(k)]['edges'] = [t for t in edges if isinstance(t, dict)]
                         save_conf(screens)
                         apply_maps()
                         log('saved calibration for %s' % ', '.join(sorted(req['screens'])))
@@ -733,11 +922,22 @@ def main():
                         st['watch'] = True
                         for d in devs:
                             d.watch = watch
+                    elif cmd == 'hold':  # while this connection is open (or until margin 0)
+                        try:
+                            st['hold'] = min(0.3, max(0.0, float(req.get('margin', 0.1))))
+                        except (TypeError, ValueError):
+                            st['hold'] = 0.1
+                        apply_hold()
+                        log('hold %.2f (calibration)' % st['hold'])
+                    elif cmd == 'last':
+                        d = next((d for d in devs if d.output == req.get('screen')), None)
+                        reply.update(last=d.last if d else None)
                     elif cmd == 'status':
                         reply.update(screens=screens, raw=raw(),
                                      devices=[{'node': d.node, 'name': d.dst, 'output': d.output, 'edge': d.edge,
                                                'heatmap': d.heat.path if d.heat else None,
-                                               'report_id': d.heat.rid if d.heat else None} for d in devs])
+                                               'report_id': d.heat.rid if d.heat else None, 'hold': d.hold,
+                                               'borders': {k: v.k for k, v in d.lut.items()}} for d in devs])
                     else:
                         reply = {'ok': False, 'error': 'unknown command'}
                     try:

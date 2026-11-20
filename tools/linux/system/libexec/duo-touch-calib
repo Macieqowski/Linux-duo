@@ -1,14 +1,20 @@
 #!/usr/bin/gjs -m
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Surface Duo touch calibration ("Kalibracja dotyku", 2026-11-20). One fullscreen window per screen shows 13
-// crosshairs one after the other (edges at 6 % / 94 %, quarter points, centre); the person taps the centre of each.
-// The taps come through the correction duo-touch-fix applies now (without it a tap aimed at the bottom crosshairs of
-// DSI-2 lands in Plasma Mobile's bottom gesture strip and opens the panel); the app takes the current map from the
+// Surface Duo touch calibration ("Kalibracja dotyku", 2026-11-20). One fullscreen window per screen shows 21
+// crosshairs one after the other (centre, quarter points, then at the middle of each edge 10 %, 6 %, 3 % and 1.5 %
+// from it); the person taps the centre of each.
+// Inside, the taps come through the correction duo-touch-fix applies now; the app takes the current map from the
 // daemon and turns each tap back into the uncorrected position (the map is piecewise linear and increasing, so its
 // inverse swaps the knots), which is the digitizer's own error. Per screen and axis the taps at the same target line
-// are averaged into [uncorrected, target] pairs (output 0..1); "Zapisz" sends them to duo-touch-fix, which applies
-// them at once and keeps them in /etc/duo/touch-calibration.json. "Bez korekcji" removes that screen's correction. After saving, the window becomes a
-// test page: every touch draws a dot where the system sees it.
+// are averaged into [uncorrected, target] pairs (output 0..1).
+// Near the edges the position is the daemon's own estimate from the heatmap, which needs calibrating per edge: for each
+// edge tap the app asks the daemon for that touch's measurement ({"cmd":"last"}: kh, where the finger's profile falls
+// to half) and keeps it with the target. While measuring, the daemon holds every touch 10 % away from the screen edges
+// ({"cmd":"hold"}): a tap at a crosshair 1.5 % from DSI-2's bottom must not open Plasma Mobile's panel. The edge taps
+// are therefore checked only along their edge.
+// "Zapisz" sends the pairs and the edge taps to duo-touch-fix, which applies them at once (per edge a lookup from kh
+// to the distance) and keeps them in /etc/duo/touch-calibration.json. "Bez korekcji" removes that screen's
+// correction. After saving, the window becomes a test page: every touch draws a dot where the system sees it.
 // Run in the desktop session: duo-touch-calib [DSI-1 DSI-2] (default: every screen). Also prints one JSON line per
 // screen on stdout.
 import Gtk from 'gi://Gtk?version=4.0';
@@ -18,9 +24,13 @@ import GLib from 'gi://GLib';
 import System from 'system';
 
 const SOCK = '/run/duo-touch-fix.sock';
-const E = 0.06;
-const FR = [[0.5, 0.5], [E, E], [0.5, E], [1 - E, E], [1 - E, 0.5], [1 - E, 1 - E], [0.5, 1 - E], [E, 1 - E],
-            [E, 0.5], [0.25, 0.5], [0.75, 0.5], [0.5, 0.25], [0.5, 0.75]];
+const DEPTHS = [0.10, 0.06, 0.03, 0.015];  // edge crosshairs: distance from the edge (fraction of the screen)
+const HOLD = 0.10;  // the daemon keeps touches this far from the edges while measuring
+// [x, y, edge]: edge = the daemon's border key (with the Duo's matrix col1 = bottom, row0 = right, col0 = top,
+// row1 = left) for the edge crosshairs, null inside
+const FR = [[0.5, 0.5, null], [0.25, 0.5, null], [0.75, 0.5, null], [0.5, 0.25, null], [0.5, 0.75, null]]
+    .concat(DEPTHS.map(d => [0.5, 1 - d, 'col1']), DEPTHS.map(d => [1 - d, 0.5, 'row0']),
+            DEPTHS.map(d => [0.5, d, 'col0']), DEPTHS.map(d => [d, 0.5, 'row1']));
 const MAX_MISS = 80;  // px: a tap further away is a slip, not a calibration point (asked again)
 
 // --- duo-touch-fix socket ---
@@ -92,6 +102,16 @@ function pairs(taps, axis, size) {
 
 const app = new Gtk.Application({application_id: 'org.duo.TouchCalib'});
 let open = 0, haveFix = false;
+const measuring = new Set();  // windows measuring now: the daemon holds touches off the edges while any is
+function holding(win, on) {
+    const had = measuring.size > 0;
+    if (on)
+        measuring.add(win);
+    else
+        measuring.delete(win);
+    if (haveFix && had !== measuring.size > 0)
+        fix({cmd: 'hold', margin: measuring.size ? HOLD : 0});
+}
 
 function screenWindow(monitor) {
     const want = monitor.get_connector() || 'screen';
@@ -111,7 +131,8 @@ function screenWindow(monitor) {
     overlay.add_overlay(box);
     win.set_child(overlay);
     // phases: wait (window not yet full screen), nofull (gave up waiting), measure, paused (long press), result, test
-    const st = {phase: 'wait', i: 0, taps: [], dots: [], lastUp: 0, miss: false, result: null, mon: null};
+    const st = {phase: 'wait', i: 0, taps: [], edges: [], dots: [], lastUp: 0, miss: false, result: null, mon: null,
+                fr: FR, seq: 0};
     const say = t => label.set_markup('<span size="large" foreground="white">' + t + '</span>');
     // full screen on the asked screen. Both screens have the same size, so the size alone does not tell which one:
     // 2026-11-20 a DSI-2 window went full screen on DSI-1 and the left screen's taps were saved as DSI-2's
@@ -119,32 +140,40 @@ function screenWindow(monitor) {
         Math.abs(area.get_width() - geo.width) <= 2 && Math.abs(area.get_height() - geo.height) <= 2;
 
     function start() {
-        st.phase = 'measure'; st.i = 0; st.taps = []; st.dots = []; st.miss = false;
+        st.phase = 'measure'; st.i = 0; st.taps = []; st.edges = []; st.dots = []; st.miss = false;
         box.visible = false;
         // the correction now applied to this screen (none if duo-touch-fix does not handle its touchscreen)
         const s = haveFix ? fix({cmd: 'status'}) : null;
         const cur = s && s.screens && s.screens[name];
-        const handled = s && Array.isArray(s.devices) && s.devices.some(d => d.output === name);
-        st.kx = cur && handled ? knots(cur.x) : IDENTITY;
-        st.ky = cur && handled ? knots(cur.y) : IDENTITY;
+        const dev = s && Array.isArray(s.devices) ? s.devices.find(d => d.output === name) : null;
+        st.kx = cur && dev ? knots(cur.x) : IDENTITY;
+        st.ky = cur && dev ? knots(cur.y) : IDENTITY;
+        // the edge crosshairs only where the daemon reads this screen's heatmap
+        st.fr = dev && dev.heatmap && dev.edge ? FR : FR.filter(f => !f[2]);
         if (haveFix && !s)
             printerr(`${name}: no status from duo-touch-fix, measuring as uncorrected`);
+        const l = haveFix ? fix({cmd: 'last', screen: name}) : null;
+        st.seq = l && l.last ? l.last.seq : 0;
+        holding(win, true);
         prompt();
         area.queue_draw();
     }
     function prompt() {
         say((st.miss ? 'Za daleko od krzyżyka, jeszcze raz.\n' : '') +
-            `${name}: dotknij dokładnie środka krzyżyka (${st.i + 1}/${FR.length})\n` +
+            `${name}: dotknij dokładnie środka krzyżyka (${st.i + 1}/${st.fr.length})\n` +
+            (st.fr[st.i][2] ? 'Przy krawędzi połóż środek opuszki na krzyżyku.\n' : '') +
             '(przytrzymaj palec, żeby przerwać)');
     }
     function finish() {
+        holding(win, false);
         const w = area.get_width(), h = area.get_height();
         if (!full()) {  // the window changed size while measuring: its fractions are not the screen's
             st.phase = 'nofull';
             notFull();
             return;
         }
-        const r = {screen: name, width: w, height: h, taps: st.taps, x: pairs(st.taps, 'x', w), y: pairs(st.taps, 'y', h)};
+        const r = {screen: name, width: w, height: h, taps: st.taps, x: pairs(st.taps, 'x', w), y: pairs(st.taps, 'y', h),
+                   edges: st.edges};
         const mean = a => +(a.reduce((x, y) => x + y, 0) / a.length).toFixed(1);
         const err = st.taps.map(p => Math.hypot(p.x - p.tx, p.y - p.ty));
         const cerr = st.taps.map(p => Math.hypot(p.cx - p.tx, p.cy - p.ty));
@@ -152,11 +181,17 @@ function screenWindow(monitor) {
         r.max_err_px = +Math.max(...err).toFixed(1);
         r.mean_err_now_px = mean(cerr);
         r.max_err_now_px = +Math.max(...cerr).toFixed(1);
+        // edge taps: how far from the target (across its edge) the current estimate puts them
+        const eerr = st.edges.filter(e => e.sx !== null && e.sy !== null)
+            .map(e => e.edge.col0 || e.edge.col1 ? Math.abs(e.sy - e.ty) * h : Math.abs(e.sx - e.tx) * w);
+        r.edge_err_now_px = eerr.length ? mean(eerr) : null;
+        r.edge_max_err_now_px = eerr.length ? +Math.max(...eerr).toFixed(1) : null;
         print(JSON.stringify(r));
         st.result = r;
         st.phase = 'result';
-        say(`${name}: bez korekcji średni błąd ${r.mean_err_px} px, największy ${r.max_err_px} px;\n` +
-            `z obecną korekcją ${r.mean_err_now_px} px, największy ${r.max_err_now_px} px.` +
+        say(`${name}: w środku bez korekcji średni błąd ${r.mean_err_px} px, z obecną ${r.mean_err_now_px} px;\n` +
+            (eerr.length ? `przy krawędziach obecnie ${r.edge_err_now_px} px, największy ${r.edge_max_err_now_px} px.`
+                         : 'przy krawędziach bez pomiaru.') +
             (haveFix ? '\nZapisać korekcję dla tego ekranu?' : '\nUsługa duo-touch-fix nie działa: tylko pomiar.'));
         bSave.sensitive = bReset.sensitive = haveFix;
         box.visible = true;
@@ -171,7 +206,7 @@ function screenWindow(monitor) {
     }
 
     bSave.connect('clicked', () => {
-        const s = {}; s[name] = {x: st.result.x, y: st.result.y};
+        const s = {}; s[name] = {x: st.result.x, y: st.result.y, edges: st.result.edges};
         const r = fix({cmd: 'save', screens: s});
         test(r && r.ok ? 'Zapisane.' : 'Nie udało się zapisać.');
     });
@@ -186,7 +221,7 @@ function screenWindow(monitor) {
         cr.setSourceRGB(0.05, 0.05, 0.1); cr.rectangle(0, 0, w, h); cr.fill();
         cr.setLineWidth(2);
         if (st.phase === 'measure') {
-            const x = FR[st.i][0] * w, y = FR[st.i][1] * h;
+            const x = st.fr[st.i][0] * w, y = st.fr[st.i][1] * h;
             cr.setSourceRGB(1, 0.85, 0.2);
             cr.moveTo(x - 30, y); cr.lineTo(x + 30, y); cr.moveTo(x, y - 30); cr.lineTo(x, y + 30); cr.stroke();
             cr.arc(x, y, 12, 0, 2 * Math.PI); cr.stroke();
@@ -196,6 +231,13 @@ function screenWindow(monitor) {
                 cr.setSourceRGB(0.3, 0.9, 1); cr.moveTo(p.tx, p.ty); cr.lineTo(p.x, p.y); cr.stroke();
                 cr.arc(p.x, p.y, 4, 0, 2 * Math.PI); cr.fill();
                 cr.setSourceRGB(0.3, 1, 0.4); cr.arc(p.cx, p.cy, 3, 0, 2 * Math.PI); cr.fill();
+            }
+            for (const e of st.edges) {  // edge taps: target, and (green) where the current estimate puts them
+                cr.setSourceRGB(1, 0.85, 0.2); cr.arc(e.tx * w, e.ty * h, 4, 0, 2 * Math.PI); cr.fill();
+                if (e.sx !== null && e.sy !== null) {
+                    cr.setSourceRGB(0.3, 1, 0.4); cr.moveTo(e.tx * w, e.ty * h); cr.lineTo(e.sx * w, e.sy * h);
+                    cr.stroke(); cr.arc(e.sx * w, e.sy * h, 3, 0, 2 * Math.PI); cr.fill();
+                }
             }
         } else if (st.phase === 'test') {
             cr.setSourceRGB(0.4, 0.4, 0.5);
@@ -224,14 +266,28 @@ function screenWindow(monitor) {
         if (downAt - st.lastUp < 250000) { st.lastUp = now; return; }  // a double tap / a split touch: ignore
         st.lastUp = now;
         const w = area.get_width(), h = area.get_height();
-        const tx = FR[st.i][0] * w, ty = FR[st.i][1] * h;
-        if (Math.hypot(d[0] - tx, d[1] - ty) > MAX_MISS) { st.miss = true; prompt(); return; }
+        const [fx, fy, key] = st.fr[st.i], tx = fx * w, ty = fy * h;
+        if (key) {
+            // held off the edge: only the position along the edge says whether this is the crosshair's tap
+            const along = key.startsWith('col') ? Math.abs(d[0] - tx) : Math.abs(d[1] - ty);
+            const r = along <= MAX_MISS ? fix({cmd: 'last', screen: name}) : null;
+            const l = r && r.last;
+            if (!l || l.seq === st.seq || !l.edge || !l.edge[key]) { st.miss = true; prompt(); return; }
+            st.seq = l.seq;
+            const edge = {}; edge[key] = l.edge[key];
+            st.edges.push({tx: fx, ty: fy, at: Date.now(), sx: l.sx, sy: l.sy, frames: l.frames, edge});
+        } else {
+            if (Math.hypot(d[0] - tx, d[1] - ty) > MAX_MISS) { st.miss = true; prompt(); return; }
+            // seen through the current correction (cx, cy); x, y = where it would be without it
+            st.taps.push({tx: +tx.toFixed(1), ty: +ty.toFixed(1), cx: +d[0].toFixed(1), cy: +d[1].toFixed(1),
+                          x: +(unmap(st.kx, d[0] / w) * w).toFixed(1), y: +(unmap(st.ky, d[1] / h) * h).toFixed(1)});
+            const r = haveFix ? fix({cmd: 'last', screen: name}) : null;  // the daemon counts this touch too
+            if (r && r.last)
+                st.seq = r.last.seq;
+        }
         st.miss = false;
-        // seen through the current correction (cx, cy); x, y = where it would be without it
-        st.taps.push({tx: +tx.toFixed(1), ty: +ty.toFixed(1), cx: +d[0].toFixed(1), cy: +d[1].toFixed(1),
-                      x: +(unmap(st.kx, d[0] / w) * w).toFixed(1), y: +(unmap(st.ky, d[1] / h) * h).toFixed(1)});
         st.i++;
-        if (st.i >= FR.length)
+        if (st.i >= st.fr.length)
             finish();
         else
             prompt();
@@ -244,6 +300,7 @@ function screenWindow(monitor) {
         if (st.phase !== 'measure')
             return;
         st.phase = 'paused';
+        holding(win, false);
         say(`${name}: pomiar przerwany.`);
         bSave.visible = bReset.visible = false;
         box.visible = true;
@@ -251,6 +308,7 @@ function screenWindow(monitor) {
     });
     area.add_controller(lp);
     win.connect('close-request', () => {
+        holding(win, false);
         if (--open <= 0)
             app.quit();
         return false;
@@ -272,6 +330,7 @@ function screenWindow(monitor) {
     // 2026-11-20: 529x648 of 529x706), or put it on the other screen. Full screen on the asked screen is requested
     // again every 1.5 s; after 9 s without it, no measurement.
     function whenFull() {
+        holding(win, false);
         st.phase = 'wait';
         box.visible = false;
         say(`${name}: chwila...`);
