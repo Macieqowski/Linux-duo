@@ -19,3 +19,4 @@ debian/chromium-duo:etc/chromium.d/duo
 debian/81-duo-ssc.rules:etc/udev/rules.d/81-duo-ssc.rules
 debian/50-duo-ipa.conf:etc/modprobe.d/50-duo-ipa.conf
 debian/geoclue/90-duo.conf:etc/geoclue/conf.d/90-duo.conf
+debian/org.duo.TouchCalib.desktop:usr/share/applications/org.duo.TouchCalib.desktop

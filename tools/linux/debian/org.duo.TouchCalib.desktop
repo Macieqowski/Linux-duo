@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Kalibracja dotyku
+Name[en]=Touch calibration
+Comment=Zmierz i popraw miejsce dotyku na obu ekranach
+Comment[en]=Measure and correct where touches land on both screens
+Exec=/usr/libexec/duo/duo-touch-calib
+Icon=preferences-desktop-touchscreen
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=touch;calibration;dotyk;kalibracja;
+X-KDE-FormFactor=handset;tablet;desktop;

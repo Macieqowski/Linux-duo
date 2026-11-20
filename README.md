@@ -382,6 +382,30 @@ wygaszeniem a blokadą. Prawdopodobnie tak było 2026-11-20 o 12:01 (dłoń na e
 `tools/linux/system/test/touch-stuck-test.py` (zasilanie zamiast bezczynności) zacięcia nie odtwarza, bo podnosi
 palce dopiero po blokadzie.
 
+## Dotyk: przesunięcie przy brzegach i „Kalibracja dotyku”
+
+Pomiar 2026-11-20 (celowniki na obu ekranach, telefon w ręce): w środku ekranu dotyk trafia dobrze, ale przy
+brzegach ucieka na zewnątrz, nieliniowo. Na prawym ekranie (DSI-2) tylko przy prawej krawędzi, o 31–38 px (logicznych,
+ok. 3 mm). Na lewym (DSI-1) przy obu bocznych krawędziach, o 20–25 px. Na obu ekranach trafia też 5–10 px za nisko.
+iptsd liczy środek plamy na siatce 21 × 27 i nie ma korekcji brzegów. Android ma ją w zamkniętej bibliotece
+Microsoftu (`libsurfacetouch.so` w usłudze `vendor.surface.touchpen@1.0-service`, z kodem dla anten brzegowych).
+Fabryczny plik `PixelAlignmentData.bin` z partycji `sfpd` (24 bajty) opisuje tylko wzajemne ustawienie obu ekranów.
+Usługa Androida czyta heatmapy z hidraw i oddaje dotyk przez uinput, więc dałoby się ją uruchomić w kontenerze
+z Androidem, ale to wielodniowa praca.
+
+Macierz libinput jest liniowa, więc takiego błędu nie poprawi. Dlatego `duo-touch-fix` (usługa
+`duo-touch-fix.service`) przejmuje każdy ekran dotykowy iptsd (EVIOCGRAB, tylko gdy żaden palec nie leży) i wystawia
+jego poprawioną kopię przez uinput: „Duo Touchscreen 045E:0C0x”. Kopia dostaje z reguły udev ten sam ekran
+(`WL_OUTPUT`) i tę samą macierz, a pozycje przechodzą przez odcinkowo-liniową mapę dla każdej osi. Krawędzie ekranu
+zawsze trafiają w krawędzie. `duo-posture` i `duo-call-audio` szukają urządzeń po „Touchscreen 045E:0C0x”, więc
+wyłączają też kopie. Gdy usługa stoi, dotyk działa jak wcześniej, bez korekcji.
+
+Korekcję mierzy aplikacja „Kalibracja dotyku” (`duo-touch-calib`, GTK4 przez gjs, na liście aplikacji). Na obu
+ekranach pokazuje po kolei 13 krzyżyków (6 % od krawędzi, ćwiartki, środek), a pomyłki dalej niż 80 px od celu i
+podwójne stuknięcia odrzuca. Na czas pomiaru prosi `duo-touch-fix` o dotyk bez korekcji. Potem pokazuje błąd
+i przyciski: „Zapisz” (od razu działa i zostaje w `/etc/duo/touch-calibration.json`), „Bez korekcji”, „Jeszcze raz”.
+Po zapisie ekran służy do sprawdzenia: każde dotknięcie rysuje krzyżyk tam, gdzie widzi je system.
+
 ## Jasność: lewy ekran jaśniejszy
 
 Lewy ekran (DSI-1, `ae94000.dsi.0`) wyglądał na jaśniejszy od prawego (DSI-2, `ae96000.dsi.0`), najbardziej po

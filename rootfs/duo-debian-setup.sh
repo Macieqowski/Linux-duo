@@ -23,7 +23,7 @@ apt-get -q -y install plasma-mobile
 # phone apps: each on its own, so one name missing from trixie does not stop the build
 for p in plasma-dialer spacebar plasma-settings maliit-keyboard angelfish kclock kweather kalk koko gnome-maps \
          discover plasma-discover-backend-flatpak flatpak chromium gnome-snapshot hfd-service plasma-mobile-tweaks \
-         geoclue-2.0 libqt6positioning6-plugins; do
+         geoclue-2.0 libqt6positioning6-plugins gjs gir1.2-gtk-4.0; do
   apt-get -q -y install "$p" > /tmp/apt-$p.log 2>&1 && echo "installed $p" || echo "not available: $p"
 done
 

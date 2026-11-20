@@ -1,0 +1,234 @@
+#!/usr/bin/gjs -m
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Surface Duo touch calibration ("Kalibracja dotyku", 2026-11-20). One fullscreen window per screen shows 13
+// crosshairs one after the other (edges at 6 % / 94 %, quarter points, centre); the person taps the centre of each.
+// While it measures, duo-touch-fix passes the touches through uncorrected ("raw" on its socket), so the taps show the
+// digitizer's own error. Per screen and axis the taps at the same target line are averaged into [measured, target]
+// pairs (output 0..1); "Zapisz" sends them to duo-touch-fix, which applies them at once and keeps them in
+// /etc/duo/touch-calibration.json. "Bez korekcji" removes that screen's correction. After saving, the window becomes a
+// test page: every touch draws a dot where the system sees it.
+// Run in the desktop session: duo-touch-calib [DSI-1 DSI-2] (default: every screen). Also prints one JSON line per
+// screen on stdout.
+import Gtk from 'gi://Gtk?version=4.0';
+import Gdk from 'gi://Gdk?version=4.0';
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+import System from 'system';
+
+const SOCK = '/run/duo-touch-fix.sock';
+const E = 0.06;
+const FR = [[0.5, 0.5], [E, E], [0.5, E], [1 - E, E], [1 - E, 0.5], [1 - E, 1 - E], [0.5, 1 - E], [E, 1 - E],
+            [E, 0.5], [0.25, 0.5], [0.75, 0.5], [0.5, 0.25], [0.5, 0.75]];
+const MAX_MISS = 80;  // px: a tap further away is a slip, not a calibration point (asked again)
+
+// --- duo-touch-fix socket ---
+let conn = null, cin = null;
+function fixConnect() {
+    try {
+        conn = new Gio.SocketClient().connect(Gio.UnixSocketAddress.new(SOCK), null);
+        cin = new Gio.DataInputStream({base_stream: conn.get_input_stream()});
+        return true;
+    } catch (e) {
+        printerr('duo-touch-fix: ' + e.message);
+        conn = null;
+        return false;
+    }
+}
+function fix(obj) {
+    if (!conn)
+        return null;
+    try {
+        conn.get_output_stream().write_all(new TextEncoder().encode(JSON.stringify(obj) + '\n'), null);
+        const [line] = cin.read_line_utf8(null);
+        return line ? JSON.parse(line) : null;
+    } catch (e) {
+        printerr('duo-touch-fix: ' + e.message);
+        return null;
+    }
+}
+
+function pairs(taps, axis, size) {
+    const groups = new Map();
+    for (const p of taps) {
+        const t = +(p['t' + axis] / size).toFixed(3);
+        if (!groups.has(t))
+            groups.set(t, []);
+        groups.get(t).push(p[axis] / size);
+    }
+    return [...groups].sort((a, b) => a[0] - b[0])
+        .map(([t, ms]) => [+(ms.reduce((a, b) => a + b, 0) / ms.length).toFixed(4), t]);
+}
+
+const app = new Gtk.Application({application_id: 'org.duo.TouchCalib'});
+let open = 0, measuring = 0, haveFix = false;
+
+function screenWindow(monitor) {
+    const name = monitor.get_connector() || 'screen';
+    const geo = monitor.get_geometry();
+    const win = new Gtk.ApplicationWindow({application: app, title: 'Kalibracja dotyku ' + name});
+    const overlay = new Gtk.Overlay();
+    const area = new Gtk.DrawingArea({hexpand: true, vexpand: true});
+    // between the 25 % and 50 % target rows; not a touch target itself (taps must reach the drawing area)
+    const label = new Gtk.Label({valign: Gtk.Align.START, halign: Gtk.Align.CENTER, margin_top: 225, wrap: true,
+                                 justify: Gtk.Justification.CENTER, max_width_chars: 30, can_target: false});
+    const box = new Gtk.Box({orientation: Gtk.Orientation.VERTICAL, spacing: 14, valign: Gtk.Align.END,
+                             halign: Gtk.Align.CENTER, margin_bottom: 60, visible: false});
+    const mk = text => { const b = new Gtk.Button({label: text}); b.set_size_request(260, 56); box.append(b); return b; };
+    const bSave = mk('Zapisz'), bReset = mk('Bez korekcji'), bAgain = mk('Jeszcze raz'), bClose = mk('Zamknij');
+    overlay.set_child(area);
+    overlay.add_overlay(label);
+    overlay.add_overlay(box);
+    win.set_child(overlay);
+    // phases: wait (window not yet full screen), measure, result, test
+    const st = {phase: 'wait', i: 0, taps: [], dots: [], lastUp: 0, miss: false, result: null};
+    const say = t => label.set_markup('<span size="large" foreground="white">' + t + '</span>');
+    const full = () => Math.abs(area.get_width() - geo.width) <= 2 && Math.abs(area.get_height() - geo.height) <= 2;
+
+    function start() {
+        st.phase = 'measure'; st.i = 0; st.taps = []; st.dots = []; st.miss = false;
+        box.visible = false;
+        measuring++;
+        if (measuring === 1 && haveFix)
+            fix({cmd: 'raw'});
+        prompt();
+        area.queue_draw();
+    }
+    function prompt() {
+        say((st.miss ? 'Za daleko od krzyżyka, jeszcze raz.\n' : '') +
+            `${name}: dotknij dokładnie środka krzyżyka (${st.i + 1}/${FR.length})`);
+    }
+    function endMeasure() {
+        measuring--;
+        if (measuring === 0 && haveFix)
+            fix({cmd: 'normal'});
+    }
+    function finish() {
+        const w = area.get_width(), h = area.get_height();
+        const r = {screen: name, width: w, height: h, taps: st.taps, x: pairs(st.taps, 'x', w), y: pairs(st.taps, 'y', h)};
+        const err = st.taps.map(p => Math.hypot(p.x - p.tx, p.y - p.ty));
+        r.mean_err_px = +(err.reduce((a, b) => a + b, 0) / err.length).toFixed(1);
+        r.max_err_px = +Math.max(...err).toFixed(1);
+        print(JSON.stringify(r));
+        st.result = r;
+        st.phase = 'result';
+        endMeasure();
+        say(`${name}: średni błąd ${r.mean_err_px} px, największy ${r.max_err_px} px.` +
+            (haveFix ? '\nZapisać korekcję dla tego ekranu?' : '\nUsługa duo-touch-fix nie działa: tylko pomiar.'));
+        bSave.sensitive = bReset.sensitive = haveFix;
+        box.visible = true;
+        area.queue_draw();
+    }
+    function test(msg) {
+        st.phase = 'test'; st.dots = [];
+        box.visible = true;
+        bSave.visible = bReset.visible = false;
+        if (measuring > 0)
+            msg += '\n(Drugi ekran jeszcze mierzy: do końca pomiaru bez korekcji.)';
+        say(msg + '\nDotykaj ekranu: kropka pokazuje, gdzie system widzi palec.');
+        area.queue_draw();
+    }
+
+    bSave.connect('clicked', () => {
+        const s = {}; s[name] = {x: st.result.x, y: st.result.y};
+        const r = fix({cmd: 'save', screens: s});
+        test(r && r.ok ? 'Zapisane.' : 'Nie udało się zapisać.');
+    });
+    bReset.connect('clicked', () => {
+        const r = fix({cmd: 'reset', screens: [name]});
+        test(r && r.ok ? 'Korekcja usunięta.' : 'Nie udało się usunąć korekcji.');
+    });
+    bAgain.connect('clicked', () => { bSave.visible = bReset.visible = true; start(); });
+    bClose.connect('clicked', () => win.close());
+
+    area.set_draw_func((a, cr, w, h) => {
+        cr.setSourceRGB(0.05, 0.05, 0.1); cr.rectangle(0, 0, w, h); cr.fill();
+        cr.setLineWidth(2);
+        if (st.phase === 'measure') {
+            const x = FR[st.i][0] * w, y = FR[st.i][1] * h;
+            cr.setSourceRGB(1, 0.85, 0.2);
+            cr.moveTo(x - 30, y); cr.lineTo(x + 30, y); cr.moveTo(x, y - 30); cr.lineTo(x, y + 30); cr.stroke();
+            cr.arc(x, y, 12, 0, 2 * Math.PI); cr.stroke();
+        } else if (st.phase === 'result') {
+            for (const p of st.taps) {
+                cr.setSourceRGB(1, 0.85, 0.2); cr.arc(p.tx, p.ty, 4, 0, 2 * Math.PI); cr.fill();
+                cr.setSourceRGB(0.3, 0.9, 1); cr.moveTo(p.tx, p.ty); cr.lineTo(p.x, p.y); cr.stroke();
+                cr.arc(p.x, p.y, 4, 0, 2 * Math.PI); cr.fill();
+            }
+        } else if (st.phase === 'test') {
+            cr.setSourceRGB(0.4, 0.4, 0.5);
+            for (const f of [0.25, 0.5, 0.75]) {
+                cr.moveTo(f * w, 0); cr.lineTo(f * w, h); cr.moveTo(0, f * h); cr.lineTo(w, f * h);
+            }
+            cr.stroke();
+            cr.setSourceRGB(0.3, 0.9, 1);
+            for (const [x, y] of st.dots.slice(-12)) {
+                cr.moveTo(x - 20, y); cr.lineTo(x + 20, y); cr.moveTo(x, y - 20); cr.lineTo(x, y + 20); cr.stroke();
+                cr.arc(x, y, 5, 0, 2 * Math.PI); cr.fill();
+            }
+        }
+        cr.$dispose();
+    });
+
+    const g = new Gtk.GestureClick();
+    let down = null, downAt = 0;
+    g.connect('pressed', (_g, _n, x, y) => { down = [x, y]; downAt = GLib.get_monotonic_time(); });
+    g.connect('released', (_g, _n, x, y) => {
+        const now = GLib.get_monotonic_time(), d = down || [x, y];
+        down = null;
+        if (st.phase === 'test') { st.dots.push(d); area.queue_draw(); return; }
+        if (st.phase !== 'measure')
+            return;
+        if (downAt - st.lastUp < 250000) { st.lastUp = now; return; }  // a double tap / a split touch: ignore
+        st.lastUp = now;
+        const w = area.get_width(), h = area.get_height();
+        const tx = FR[st.i][0] * w, ty = FR[st.i][1] * h;
+        if (Math.hypot(d[0] - tx, d[1] - ty) > MAX_MISS) { st.miss = true; prompt(); return; }
+        st.miss = false;
+        st.taps.push({tx: +tx.toFixed(1), ty: +ty.toFixed(1), x: +d[0].toFixed(1), y: +d[1].toFixed(1)});
+        st.i++;
+        if (st.i >= FR.length)
+            finish();
+        else
+            prompt();
+        area.queue_draw();
+    });
+    area.add_controller(g);
+    win.connect('close-request', () => {
+        if (st.phase === 'measure')
+            endMeasure();
+        if (--open <= 0)
+            app.quit();
+        return false;
+    });
+    open++;
+    say(`${name}: chwila...`);
+    win.present();
+    win.fullscreen_on_monitor(monitor);
+    // measure only once the window covers the whole screen (KWin may first place it between the panels)
+    let waited = 0;
+    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+        waited += 100;
+        if (st.phase !== 'wait')
+            return GLib.SOURCE_REMOVE;
+        if (full() || waited >= 4000) {
+            if (!full())
+                printerr(`${name}: window ${area.get_width()}x${area.get_height()}, screen ${geo.width}x${geo.height}`);
+            start();
+            return GLib.SOURCE_REMOVE;
+        }
+        return GLib.SOURCE_CONTINUE;
+    });
+}
+
+app.connect('activate', () => {
+    haveFix = fixConnect();
+    const want = ARGV.length ? ARGV : null;
+    const mons = Gdk.Display.get_default().get_monitors();
+    for (let i = 0; i < mons.get_n_items(); i++) {
+        const m = mons.get_item(i);
+        if (!want || want.includes(m.get_connector()))
+            screenWindow(m);
+    }
+    if (!open) { printerr('no matching screen'); app.quit(); }
+});
+System.exit(app.run([System.programInvocationName]));

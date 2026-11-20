@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Surface Duo touch position correction (duo-touch-fix, 2026-11-20).
+
+iptsd turns each digitizer's heatmap into a "IPTSD Virtual Touchscreen 045E:0C0x" evdev device, and KWin maps it onto
+its screen through duo-hw's udev rule (WL_OUTPUT + LIBINPUT_CALIBRATION_MATRIX). That linear mapping is not enough
+near the edges: measured with duo-touch-calib, taps land up to ~38 px (3 mm) too far out towards some edges and the
+error is not linear (Android's Microsoft touch library has its own edge correction; iptsd has none), so a libinput
+matrix cannot fix it.
+
+This daemon puts one corrected copy in front of each iptsd touchscreen: it grabs the iptsd device (EVIOCGRAB: KWin no
+longer gets its events), creates a uinput clone with the same capabilities, named "Duo Touchscreen 045E:0C0x" (so
+duo-posture / duo-call-audio, which match "Touchscreen 045E:0C0x", switch both), gives the clone the same udev
+WL_OUTPUT + matrix, and forwards every event, with the positions passed through a per-axis piecewise-linear map.
+If the daemon stops, the grab ends and the iptsd devices work as before (uncorrected).
+
+The map comes from /etc/duo/touch-calibration.json, written through the socket by the calibration app
+(duo-touch-calib): per screen and output axis, pairs [measured, target] in the output's 0..1 coordinates, measured
+without correction ("raw" mode, which the app holds while it measures). The screen edges always map onto themselves.
+Socket /run/duo-touch-fix.sock, one JSON object per line: {"cmd":"raw"} (no correction while this connection is
+open, or until {"cmd":"normal"}), {"cmd":"save","screens":{"DSI-2":{"x":[[m,t],..],"y":[[m,t],..]}}} (merged per
+screen), {"cmd":"reset","screens":["DSI-2"]} (no correction for those screens; no list = all), {"cmd":"status"}.
+Run as root (uinput, EVIOCGRAB): duo-touch-fix.service.
+"""
+import fcntl, glob, json, os, select, socket, struct, subprocess, sys, time
+
+CONF = '/etc/duo/touch-calibration.json'
+SOCK = '/run/duo-touch-fix.sock'
+RULES = '/run/udev/rules.d/91-duo-touch-fix.rules'
+SRC = 'IPTSD Virtual Touchscreen'
+DST = 'Duo Touchscreen'
+EV_SYN, EV_KEY, EV_ABS, EV_MSC = 0, 1, 3, 4
+ABS_X, ABS_Y, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID = 0x00, 0x01, 0x35, 0x36, 0x39
+EVENT = struct.Struct('llHHi')  # struct input_event, 64-bit
+
+
+def _ioc(d, nr, size):
+    return (d << 30) | (size << 16) | (0x45 << 8) | nr
+
+
+EVIOCGRAB = 0x40044590
+EVIOCGID = _ioc(2, 0x02, 8)
+EVIOCGBIT = lambda ev, n: _ioc(2, 0x20 + ev, n)
+EVIOCGABS = lambda code: _ioc(2, 0x40 + code, 24)
+EVIOCGPROP = _ioc(2, 0x09, 8)
+EVIOCGMTSLOTS_64 = _ioc(2, 0x0a, 4 + 4 * 64)
+UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_ABSBIT, UI_SET_MSCBIT, UI_SET_PROPBIT = (0x40045564, 0x40045565, 0x40045567,
+                                                                            0x40045568, 0x4004556e)
+UI_DEV_SETUP, UI_ABS_SETUP, UI_DEV_CREATE, UI_DEV_DESTROY = 0x405c5503, 0x401c5504, 0x5501, 0x5502
+UI_SET = {EV_KEY: (UI_SET_KEYBIT, 0x2ff), EV_ABS: (UI_SET_ABSBIT, 0x3f), EV_MSC: (UI_SET_MSCBIT, 0x07)}
+
+
+def log(msg):
+    print(time.strftime('%H:%M:%S ') + msg, flush=True)
+
+
+def bits(fd, ev, top):
+    buf = bytearray((top + 8) // 8)
+    fcntl.ioctl(fd, EVIOCGBIT(ev, len(buf)), buf)
+    return [i for i in range(top + 1) if buf[i // 8] >> (i % 8) & 1]
+
+
+def udev_props(node):
+    out = subprocess.run(['udevadm', 'info', '--query=property', '--name=' + node], capture_output=True, text=True)
+    return dict(l.split('=', 1) for l in out.stdout.splitlines() if '=' in l)
+
+
+class Map:
+    """piecewise-linear map on 0..1 through (0,0), the measured knots, (1,1)"""
+
+    def __init__(self, pairs=()):
+        k = sorted((float(m), float(t)) for m, t in pairs if 0.0 < float(m) < 1.0 and 0.0 < float(t) < 1.0)
+        pts = [(0.0, 0.0)]
+        for m, t in k:  # keep it strictly increasing in both
+            if m > pts[-1][0] + 1e-4 and t > pts[-1][1] + 1e-4:
+                pts.append((m, t))
+        pts.append((1.0, 1.0))
+        while len(pts) > 2 and pts[-2][1] >= 1.0 - 1e-4:
+            pts.pop(-2)
+        self.pts = pts
+
+    def __call__(self, v):
+        p = self.pts
+        if v <= 0.0 or v >= 1.0:
+            return v
+        for i in range(1, len(p)):
+            if v <= p[i][0]:
+                (m0, t0), (m1, t1) = p[i - 1], p[i]
+                return t0 + (v - m0) * (t1 - t0) / (m1 - m0)
+        return v
+
+    def identity(self):
+        return len(self.pts) == 2
+
+
+class Dev:
+    def __init__(self, node, name, output, matrix):
+        self.node, self.name, self.output, self.matrix = node, name, output, matrix
+        self.suffix = name[len(SRC):].strip()
+        self.dst = ('%s %s' % (DST, self.suffix)).strip()
+        self.fd = os.open(node, os.O_RDONLY | os.O_NONBLOCK)
+        self.ui = None
+        self.grabbed = False
+        try:
+            self.evs = bits(self.fd, 0, 0x1f)
+            self.caps = {ev: bits(self.fd, ev, UI_SET[ev][1]) for ev in UI_SET if ev in self.evs}
+            self.abs = {}
+            for code in self.caps.get(EV_ABS, []):
+                buf = bytearray(24)
+                fcntl.ioctl(self.fd, EVIOCGABS(code), buf)
+                self.abs[code] = struct.unpack('6i', buf)  # value min max fuzz flat resolution
+            buf = bytearray(8)
+            fcntl.ioctl(self.fd, EVIOCGPROP, buf)
+            self.props = [i for i in range(64) if buf[i // 8] >> (i % 8) & 1]
+            buf = bytearray(8)
+            fcntl.ioctl(self.fd, EVIOCGID, buf)
+            self.id = struct.unpack('4H', buf)
+        except OSError:
+            os.close(self.fd)
+            raise
+        self.mx = self.my = Map()
+
+    def create(self):
+        ui = os.open('/dev/uinput', os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            for ev in self.evs:
+                fcntl.ioctl(ui, UI_SET_EVBIT, ev)
+            for ev, codes in self.caps.items():
+                for c in codes:
+                    fcntl.ioctl(ui, UI_SET[ev][0], c)
+            for p in self.props:
+                fcntl.ioctl(ui, UI_SET_PROPBIT, p)
+            for code, (v, lo, hi, fuzz, flat, res) in self.abs.items():
+                fcntl.ioctl(ui, UI_ABS_SETUP, struct.pack('HHiiiiii', code, 0, v, lo, hi, fuzz, flat, res))
+            fcntl.ioctl(ui, UI_DEV_SETUP, struct.pack('HHHH80sI', *self.id, self.dst.encode()[:79], 0))
+            fcntl.ioctl(ui, UI_DEV_CREATE)
+        except OSError:
+            os.close(ui)
+            raise
+        self.ui = ui
+
+    def fingers(self):
+        buf = bytearray(struct.pack('I', ABS_MT_TRACKING_ID) + struct.pack('64i', *([-1] * 64)))
+        try:
+            fcntl.ioctl(self.fd, EVIOCGMTSLOTS_64, buf)
+        except OSError:
+            return 0
+        return sum(1 for v in struct.unpack_from('64i', buf, 4) if v != -1)
+
+    def grab(self):
+        fcntl.ioctl(self.fd, EVIOCGRAB, 1)
+        self.grabbed = True
+
+    def set_maps(self, screen, raw):
+        """screen: {"x": pairs, "y": pairs} in output coordinates -> maps on this device's raw X / raw Y"""
+        self.mx = self.my = Map()
+        if raw or not screen:
+            return
+        try:
+            a, b, c, d, e, f = (float(v) for v in self.matrix.split())
+        except ValueError:
+            a, b, c, d, e, f = 1, 0, 0, 0, 1, 0
+        # output_x = a*nx + b*ny + c, output_y = d*nx + e*ny + f (nx, ny = raw 0..1); only axis-aligned matrices
+        rows = (('x', a, b, c), ('y', d, e, f))
+        maps = {}
+        for out, p, q, r in rows:
+            if abs(p) == 1 and q == 0:
+                raw_axis, s = 'nx', p
+            elif abs(q) == 1 and p == 0:
+                raw_axis, s = 'ny', q
+            else:
+                log('%s: matrix %s is not axis-aligned, no correction' % (self.dst, self.matrix))
+                return
+            pairs = [((m - r) / s, (t - r) / s) for m, t in screen.get(out, [])]
+            maps[raw_axis] = Map(pairs)
+        self.mx, self.my = maps.get('nx', Map()), maps.get('ny', Map())
+
+    def fix(self, code, v):
+        m = self.mx if code in (ABS_X, ABS_MT_POSITION_X) else self.my
+        if m.identity():
+            return v
+        _, lo, hi, _, _, _ = self.abs[code]
+        if hi <= lo:
+            return v
+        return int(round(lo + m((v - lo) / (hi - lo)) * (hi - lo)))
+
+    def forward(self):
+        data = os.read(self.fd, EVENT.size * 128)
+        out = []
+        for i in range(0, len(data) - EVENT.size + 1, EVENT.size):
+            sec, usec, t, code, v = EVENT.unpack_from(data, i)
+            if t == EV_ABS and code in (ABS_X, ABS_Y, ABS_MT_POSITION_X, ABS_MT_POSITION_Y):
+                v = self.fix(code, v)
+            out.append(EVENT.pack(0, 0, t, code, v))
+        if out and self.ui is not None:
+            os.write(self.ui, b''.join(out))
+
+    def close(self):
+        if self.grabbed:
+            try:
+                fcntl.ioctl(self.fd, EVIOCGRAB, 0)
+            except OSError:
+                pass
+        if self.ui is not None:
+            try:
+                fcntl.ioctl(self.ui, UI_DEV_DESTROY)
+            except OSError:
+                pass
+            os.close(self.ui)
+        os.close(self.fd)
+
+
+def load_conf():
+    try:
+        with open(CONF) as f:
+            c = json.load(f)
+        return c.get('screens', {}) if isinstance(c, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_conf(screens):
+    os.makedirs(os.path.dirname(CONF), exist_ok=True)
+    tmp = CONF + '.new'
+    with open(tmp, 'w') as f:
+        json.dump({'version': 1, 'screens': screens}, f, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, CONF)
+    os.sync()
+
+
+def write_rules(devs):
+    os.makedirs(os.path.dirname(RULES), exist_ok=True)
+    lines = ['# duo-touch-fix: the corrected touchscreens get their screen and matrix like the iptsd ones']
+    for d in devs:
+        lines.append('SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="%s", ENV{WL_OUTPUT}="%s", '
+                     'ENV{LIBINPUT_CALIBRATION_MATRIX}="%s"' % (d.dst, d.output, d.matrix))
+    with open(RULES + '.new', 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+    os.replace(RULES + '.new', RULES)
+    subprocess.run(['udevadm', 'control', '--reload'])
+
+
+def scan(devs, pending):
+    """new iptsd touchscreens -> Dev objects (not yet created / grabbed); returns how many were added"""
+    have = {d.node for d in devs} | {d.node for d in pending}
+    n = 0
+    for p in sorted(glob.glob('/sys/class/input/event*/device/name')):
+        try:
+            name = open(p).read().strip()
+        except OSError:
+            continue
+        node = '/dev/input/' + p.split('/')[4]
+        if not name.startswith(SRC) or node in have:
+            continue
+        pr = udev_props(node)
+        if not pr.get('WL_OUTPUT'):
+            continue  # duo-hw writes its rule right after iptsd starts: next round
+        try:
+            pending.append(Dev(node, name, pr['WL_OUTPUT'], pr.get('LIBINPUT_CALIBRATION_MATRIX', '1 0 0 0 1 0')))
+            log('found %s (%s) on %s' % (node, name, pr['WL_OUTPUT']))
+            n += 1
+        except OSError as e:
+            log('%s: %s' % (node, e))
+    return n
+
+
+def main():
+    devs, pending, clients = [], [], {}
+    screens = load_conf()
+    log('calibration: %s' % (', '.join(sorted(screens)) or 'none'))
+
+    def raw():
+        return any(c['raw'] for c in clients.values())
+
+    def apply_maps():
+        r = raw()
+        for d in devs:
+            d.set_maps(screens.get(d.output), r)
+
+    try:
+        os.unlink(SOCK)
+    except FileNotFoundError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(SOCK)
+    os.chmod(SOCK, 0o666)  # the calibration app runs as the desktop user
+    srv.listen(4)
+    next_scan = 0.0
+    while True:
+        now = time.monotonic()
+        if now >= next_scan:
+            next_scan = now + 2.0
+            for d in [d for d in devs if not os.path.exists(d.node)]:
+                log('%s gone' % d.node)
+                devs.remove(d)
+                d.close()
+            if scan(devs, pending):
+                write_rules(devs + pending)  # before the clones exist, so libinput sees WL_OUTPUT at once
+            for d in list(pending):
+                try:
+                    if d.ui is None:
+                        d.create()
+                        log('created %s for %s' % (d.dst, d.output))
+                        continue  # give udev/KWin a round to add the clone before the grab
+                    if d.fingers():
+                        continue  # never grab under a finger: KWin would keep that touch forever
+                    d.grab()
+                    pending.remove(d)
+                    devs.append(d)
+                    d.set_maps(screens.get(d.output), raw())
+                    log('%s now corrected (%s)' % (d.dst, 'calibrated' if d.output in screens else 'no calibration'))
+                except OSError as e:
+                    log('%s: %s' % (d.node, e))
+                    pending.remove(d)
+                    d.close()
+        rl = [srv] + [d.fd for d in devs] + list(clients)
+        try:
+            ready, _, _ = select.select(rl, [], [], max(0.0, next_scan - time.monotonic()))
+        except InterruptedError:
+            continue
+        for fd in ready:
+            if fd is srv:
+                c, _ = srv.accept()
+                clients[c] = {'raw': False, 'buf': b''}
+                continue
+            if fd in clients:
+                st = clients[fd]
+                try:
+                    chunk = fd.recv(65536)
+                except OSError:
+                    chunk = b''
+                if not chunk:
+                    del clients[fd]
+                    fd.close()
+                    if st['raw']:
+                        apply_maps()
+                        log('raw mode ended (client gone)')
+                    continue
+                st['buf'] += chunk
+                while b'\n' in st['buf']:
+                    line, st['buf'] = st['buf'].split(b'\n', 1)
+                    try:
+                        req = json.loads(line)
+                        cmd = req.get('cmd')
+                    except (ValueError, AttributeError):
+                        req, cmd = {}, None
+                    reply = {'ok': True}
+                    if cmd == 'raw':
+                        st['raw'] = True
+                        apply_maps()
+                        log('raw mode (calibration)')
+                    elif cmd == 'normal':
+                        st['raw'] = False
+                        apply_maps()
+                        log('raw mode ended')
+                    elif cmd == 'save' and isinstance(req.get('screens'), dict):
+                        for k, v in req['screens'].items():
+                            if isinstance(v, dict):
+                                screens[str(k)] = {a: [[float(m), float(t)] for m, t in v.get(a, [])] for a in 'xy'}
+                        save_conf(screens)
+                        apply_maps()
+                        log('saved calibration for %s' % ', '.join(sorted(req['screens'])))
+                    elif cmd == 'reset':
+                        for k in (req.get('screens') or list(screens)):
+                            screens.pop(k, None)
+                        save_conf(screens)
+                        apply_maps()
+                        log('calibration reset: %s' % (', '.join(sorted(screens)) or 'none left'))
+                    elif cmd == 'status':
+                        reply.update(screens=screens, raw=raw(),
+                                     devices=[{'node': d.node, 'name': d.dst, 'output': d.output} for d in devs])
+                    else:
+                        reply = {'ok': False, 'error': 'unknown command'}
+                    try:
+                        fd.sendall((json.dumps(reply) + '\n').encode())
+                    except OSError:
+                        pass
+                continue
+            d = next((d for d in devs if d.fd == fd), None)
+            if d is None:
+                continue
+            try:
+                d.forward()
+            except BlockingIOError:
+                pass
+            except OSError as e:
+                log('%s: %s, dropped' % (d.node, e))
+                devs.remove(d)
+                d.close()
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        pass
