@@ -252,7 +252,16 @@ Android na Duo (biblioteka `lights.msmnile.so`) przelicza jasność z suwaka na 
 tabelę nity -> wartość podświetlenia (partycja `sfpd`, `display/FactoryOs_LUT2_0.txt` i `_1.txt`). Na testowanym
 egzemplarzu obie tabele różnią się najwyżej o ok. 1 % (30 nitów: 164,1 i 163,9), a polecenia startowe obu paneli w DT
 Androida są takie same jak w sterowniku `panel-microsoft-surface-duo`. Fabrycznie panele świecą więc przy tej samej
-wartości tak samo i przyczyna różnicy w Linuksie jest gdzie indziej (sprawdzane).
+wartości tak samo.
+
+Przyczyna jest w KWin 6.3: jasność ekranu (suwak razy przygaszenie po bezczynności) ustawia on przez urządzenie
+jasności przypisane do ekranu, a gdy ekran go nie ma i w `~/.config/kwinoutputconfig.json` jest
+`allowSdrSoftwareBrightness: true`, przyciemnia sam obraz. PowerDevil daje KWin tylko jedno podświetlenie i KWin
+przypisuje je pierwszemu wewnętrznemu ekranowi (DSI-1, lewy). Prawy ekran (DSI-2) był więc przyciemniany dwa razy: w
+obrazie i podświetleniem, które `duo-autobrightness` kopiuje z lewego. Najbardziej widać to po przygaszeniu (suwak 52
+% razy przygaszenie 30 %: obraz prawego ekranu przy ok. 1/5 jasności). `duo-kwin-outputs` (usługa `duo-kwin-outputs`
+przed menedżerem logowania, bo KWin czyta ten plik tylko przy starcie) wyłącza `allowSdrSoftwareBrightness` na obu
+ekranach DSI. Czy po tej poprawce krzywa z `/etc/duo/brightness-balance` jest jeszcze potrzebna: test w toku.
 
 ## Wibracje: reset telefonu przy „sile wibracji”
 

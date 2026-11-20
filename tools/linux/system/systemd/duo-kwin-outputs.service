@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo: no KWin software brightness on the DSI panels (duo-kwin-outputs; README "Jasność: lewy ekran
+# jaśniejszy"). KWin reads kwinoutputconfig.json only when it starts, so this runs before the display manager.
+[Unit]
+Description=Surface Duo KWin output settings (no software brightness on the panels)
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/duo/duo-kwin-outputs
+
+[Install]
+WantedBy=multi-user.target

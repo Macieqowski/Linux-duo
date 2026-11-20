@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Surface Duo: no KWin software brightness on the panels (2026-11-20). README: "Jasność: lewy ekran jaśniejszy".
+
+KWin 6.3 sets an output's brightness (slider x idle dimming) through the brightness device it got for that output,
+or, when the output has none and allowSdrSoftwareBrightness is on, in the image itself (lower SDR reference
+luminance, 5 + 195 x brightness nits). PowerDevil gives KWin one backlight only, which KWin assigns to the first
+internal output (DSI-1, the left screen). So the right screen (DSI-2) was dimmed twice: in the image and through its
+backlight, which duo-autobrightness copies from the left one. It looked darker than the left, most of all when
+PowerDevil dims the screens at idle (brightness 52 % x dimming 30 %: the right image at about a fifth).
+
+This sets allowSdrSoftwareBrightness false for every DSI output in each user's ~/.config/kwinoutputconfig.json
+(KWin writes the default, true for an output without a brightness device, the first time it sees it). KWin reads the
+file only when it starts: duo-kwin-outputs.service runs this before the display manager. Prints what it changed.
+"""
+import glob, json, os, sys
+
+
+def fix(path):
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as e:
+        print('%s: skipped (%s)' % (path, e))
+        return False
+    changed = []
+    for entry in doc if isinstance(doc, list) else []:
+        if not isinstance(entry, dict) or entry.get('name') != 'outputs' or not isinstance(entry.get('data'), list):
+            continue
+        for out in entry['data']:
+            if (isinstance(out, dict) and str(out.get('connectorName', '')).startswith('DSI-')
+                    and out.get('allowSdrSoftwareBrightness') is not False):
+                out['allowSdrSoftwareBrightness'] = False
+                changed.append(out['connectorName'])
+    if not changed:
+        return False
+    st = os.stat(path)
+    tmp = path + '.duo-new'
+    with open(tmp, 'w') as f:
+        json.dump(doc, f, indent=4)
+        f.write('\n')
+        f.flush()
+        os.fsync(f.fileno())
+    os.chown(tmp, st.st_uid, st.st_gid)
+    os.chmod(tmp, st.st_mode & 0o7777)
+    os.replace(tmp, path)
+    print('%s: allowSdrSoftwareBrightness false on %s' % (path, ', '.join(changed)))
+    return True
+
+
+def main():
+    paths = sys.argv[1:] or glob.glob('/home/*/.config/kwinoutputconfig.json')
+    for p in paths:
+        fix(p)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
