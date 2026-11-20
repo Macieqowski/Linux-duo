@@ -178,23 +178,32 @@ głosowe), śledzi połączenia w ModemManagerze i:
 
 - przy dzwonieniu (przychodzącym albo wybieraniu numeru) dokłada w kodeku tor słuchawki, tor głośnika zostaje (dzwonek);
 - przy odebraniu, a przy wychodzącym już przy sygnale dzwonienia, wyłącza tor głośnika i od razu otwiera PCM głosowy;
-- po rozłączeniu zamyka PCM i przywraca głośnik.
+- po rozłączeniu zamyka PCM i przywraca głośnik. Pierwszy obiekt połączenia przychodzącego w ModemManagerze często
+  znika po 1–3 s i pojawia się nowy, dlatego usługa czeka 6 s, zanim uzna nieodebrane połączenie za skończone.
 
-W rozmowie usługa bierze mikrofon u dołu prawej połówki (`DMIC MUX7` = `DMIC1`, ten sam co Android) z `DEC7 Volume`
-90 (+6 dB, najlepszy z poziomów 66/74/82/90 w rozmowie testowej). `DMIC2` to mikrofon u góry lewej połówki. `DMIC3`
-czyta drugą krawędź tej samej linii danych co `DMIC2`, więc daje ten sam mikrofon (korelacja 0,99), a `DMIC0`, `DMIC4`
-i `DMIC5` dają cyfrowe zero. Profil HiFi w UCM (`DMIC3` + `DMIC2`) nagrywa więc na razie dwa razy
-górny mikrofon. W nagraniu HiFi kanał z `DEC7` wychodzi ok. 20 dB głośniej niż z `DEC8` przy tym samym ustawieniu
-(ten sam mikrofon na `DMIC3` i `DMIC2`), więc poziomów z nagrania nie da się przenieść wprost na rozmowę.
+W rozmowie usługa bierze mikrofon u dołu prawej połówki (`DMIC MUX7` = `DMIC1`, ten sam co Android) z `DEC7 Volume` 90
+(+6 dB, najlepszy z poziomów 66/74/82/90 w rozmowie testowej). `DMIC2` to mikrofon u góry lewej połówki. `DMIC3` czyta
+drugą krawędź tej samej linii danych co `DMIC2`, więc daje ten sam mikrofon (korelacja 0,99), a `DMIC0`, `DMIC4` i
+`DMIC5` dają cyfrowe zero (wcześniejszy komentarz w UCM „DMIC1 nie jest podłączony” był błędny). Profil HiFi w UCM
+(`DMIC3` + `DMIC2`) nagrywa więc na razie dwa razy górny mikrofon. W nagraniu HiFi kanał z `DEC7` wychodzi ok. 20 dB
+głośniej niż z `DEC8` przy tym samym ustawieniu (ten sam mikrofon na `DMIC3` i `DMIC2`), więc poziomów z nagrania nie
+da się przenieść wprost na rozmowę.
 
 Kodek trzeba przełączyć na słuchawkę chwilę przed startem toru głosowego. Gdy przełączenie było tuż przed startem
 (w `dmesg`: `overflow error on RX port 0`), słuchawka milczała aż do ponownego otwarcia PCM, przy dowolnym odstępie
 od odebrania. Dlatego usługa przełącza kodek już przy dzwonieniu; dźwięk jest ok. 1,5 s po odebraniu. Ustawienia
 (głośność słuchawki, mikrofon i jego czułość, start przy sygnale dzwonienia) są w `/etc/default/duo-call-audio`, opis
 w nagłówku skryptu. Nie przeładowuj modułów q6voice w działającym systemie: karta się przebindowuje i porty AFE
-nie działają aż do restartu telefonu.
+nie działają aż do restartu telefonu. Komunikaty kodeka `overflow error on RX port 0` / `TX port 8` przy
+przełączaniu tras poza startem toru głosowego są nieszkodliwe.
 
-Do zrobienia: przełączanie na głośnik (tryb głośnomówiący), głośność rozmowy z suwaka, dzwonek z wibracją, VoLTE.
+Telefon testowy z obrazem sprzed serii `0080`–`0084` działa tymczasowo z modułami q6voice z tymi poprawkami w wersji
+diagnostycznej: `/lib/modules/$(uname -r)/updates/q6voice` (po `depmod`) i `/etc/modprobe.d/duo-q6voice.conf`
+z `options q6voice cvs_unmute=1 tx_topo_override=0x10f70` oraz `options q6cvp fix_rx_map=1`. Jądro z tego repo
+tego nie potrzebuje.
+
+Do zrobienia: przełączanie na głośnik (tryb głośnomówiący), głośność rozmowy z suwaka, dzwonek z wibracją, VoLTE,
+drugi kanał mikrofonu w UCM na `DMIC1` zamiast `DMIC3`.
 
 ## Wibracje: reset telefonu przy „sile wibracji”
 
