@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo GPS assistance: refresh the XTRA orbit data (valid for days, re-downloaded when older than 24 h) and the
+# modem's time while the phone stays up; the boot run comes from duo-gps-assist.service itself
+[Unit]
+Description=Surface Duo GPS assistance refresh (XTRA + time)
+
+[Timer]
+OnUnitActiveSec=12h
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

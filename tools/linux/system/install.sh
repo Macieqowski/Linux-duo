@@ -67,6 +67,8 @@ fi
 G=; [ -x "$ROOT/usr/libexec/duo/duo-gps-assist" ] && { [ -x "$ROOT/usr/local/bin/duo-gps" ] || { [ -z "$ROOT" ] && command -v duo-gps > /dev/null; }; } && G=duo-gps-assist
 if [ $INIT = systemd ]; then
 	[ -n "$ROOT" ] || systemctl daemon-reload
+	# the XTRA refresh while the phone stays up (systemd only; OpenRC gets the boot run)
+	[ -n "$G" ] && [ -f "$D/systemd/duo-gps-assist.timer" ] && G="$G duo-gps-assist.timer"
 	sctl enable $SVC $G > /dev/null 2>&1
 else
 	for s in $SVC $G; do

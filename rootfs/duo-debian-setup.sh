@@ -21,8 +21,9 @@ apt-get -q -y --no-install-recommends install sddm hexagonrpcd iio-sensor-proxy 
 apt-get -q -y install plasma-mobile
 
 # phone apps: each on its own, so one name missing from trixie does not stop the build
-for p in plasma-dialer spacebar plasma-settings maliit-keyboard angelfish kclock kweather kalk koko \
-         discover plasma-discover-backend-flatpak flatpak chromium gnome-snapshot hfd-service plasma-mobile-tweaks; do
+for p in plasma-dialer spacebar plasma-settings maliit-keyboard angelfish kclock kweather kalk koko marble-maps \
+         discover plasma-discover-backend-flatpak flatpak chromium gnome-snapshot hfd-service plasma-mobile-tweaks \
+         geoclue-2.0 libqt6positioning6-plugins; do
   apt-get -q -y install "$p" > /tmp/apt-$p.log 2>&1 && echo "installed $p" || echo "not available: $p"
 done
 

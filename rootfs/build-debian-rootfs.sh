@@ -64,7 +64,7 @@ sh "$L/system/install.sh" --init=systemd --root="$R" --desktop=plasma
 # enable with the chroot's own systemctl (the host's may be older than trixie's units expect)
 in_chroot systemctl enable duo-watchdog duo-bootanim duo-hw duo-bootanim-done duo-charger duo-modem duo-sensors \
   duo-bt-addr duo-mtp duo-autobrightness duo-posture >/dev/null 2>&1 || true
-[ -x "$R/usr/local/bin/duo-gps" ] && in_chroot systemctl enable duo-gps-assist >/dev/null 2>&1 || true
+[ -x "$R/usr/local/bin/duo-gps" ] && in_chroot systemctl enable duo-gps-assist duo-gps-assist.timer >/dev/null 2>&1 || true
 # the Duo's config files (audio UCM + tuning, udev/polkit rules, firewall, Chromium flags, hinge gap app):
 # linuxduobench's own list, tools/linux/debian/duo-files.list (<source in tools/linux>:<destination in the root>)
 grep -v '^#' "$L/debian/duo-files.list" | while IFS=: read -r src dst; do

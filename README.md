@@ -29,7 +29,7 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | Aparat | częściowo | wymaga modułu imx351 zbudowanego z danych Twojego telefonu |
 | Ładowanie, bateria | działa | qcom_smbx (SMB5) + 2x bq27742 |
 | Usypianie | wyłączone | s2idle działa, ale telefon się nie budził; na razie bez usypiania |
-| GPS | częściowo | pozycja z sieci tak, fix satelitarny niepotwierdzony; [pomoc XTRA](#gps) |
+| GPS | działa | fix z satelitów (GPS, GLONASS, Galileo) w ~6 min z [pomocą XTRA](#gps), 13–16 m; dla aplikacji przez geoclue, mapa Marble Maps |
 | Czytnik linii papilarnych | nie | siedzi w TrustZone |
 
 ## Jak to się uruchamia
@@ -511,8 +511,24 @@ Poprawka 2026-11-20: w obrazie Debiana nie ma `wget`, a skrypt czekał na sieć 
 pobrane ani razu (`/var/cache/duo-gps` był pusty). Teraz skrypt czeka na odpowiedź DNS dla `path1.xtracloud.net`
 i pobiera plik przez `curl` (zapasowo `wget` albo `python3`).
 
-ModemManager zgłasza źródła lokalizacji `3gpp-lac-ci`, `gps-raw`, `gps-nmea`, `agps-msa`, `agps-msb`; domyślnie
-włączone jest tylko `3gpp-lac-ci`. Geoclue i aplikacji z mapą w obrazie jeszcze nie ma.
+Test przy oknie (2026-11-20, z XTRA i czasem): pierwszy fix z satelitów po około 6 minutach (maska `0x1`), potem
+pozycja cały czas z dokładnością 13–16 m. Silnik śledzi jednocześnie GPS, GLONASS i Galileo (do 33 dB-Hz). Bez XTRA
+przez pierwsze minuty nie było żadnego satelity. Gdy modem jest „ciepły”, kolejna pozycja przychodzi po kilkunastu
+sekundach. `duo-gps-assist.timer` powtarza pomoc co 12 h, bo dane XTRA i czas żyją tylko w pamięci modemu.
+
+Lokalizacja dla aplikacji idzie przez geoclue: `geoclue-2.0`, `libqt6positioning6-plugins` (wtyczka `geoclue2` dla
+aplikacji Qt) i mapa `marble-maps` są w obrazie. Geoclue bierze pozycję z GNSS modemu przez ModemManager (sam włącza
+źródło `gps-nmea` na czas, gdy jakaś aplikacja pyta, i wyłącza je potem). `tools/linux/debian/geoclue/90-duo.conf`
+(`/etc/geoclue/conf.d/`) wyłącza źródła, które wysyłają dane do usług w internecie (Wi-Fi, 3G) oraz NMEA z sieci
+lokalnej. Źródło statyczne zostaje włączone celowo, bez pliku `/etc/geolocation`: gdy Wi-Fi i źródło statyczne są
+wyłączone, geoclue sięga po przybliżoną pozycję z adresu IP (na telefonie: „ipf fallback (from GeoIP data)”).
+Aplikacje potrzebują agenta geoclue w sesji, a Plasma Mobile nie ma własnego. Agent demonstracyjny z pakietu
+`geoclue-2.0` (`/etc/xdg/autostart/geoclue-demo-agent.desktop`) startuje w Plasmie. Gdy agent jest zarejestrowany,
+geoclue 2.7 wpuszcza wszystkie aplikacje spoza Flatpaka bez pytania, a o aplikacje z Flatpaka pyta przez powiadomienie.
+Na telefonie `where-am-i` dostało pozycję „GPS GGA+RMC” z dokładnością 3 m po 13 s.
+
+ModemManager zgłasza źródła lokalizacji `3gpp-lac-ci`, `gps-raw`, `gps-nmea`, `agps-msa`, `agps-msb`; na stałe
+włączone jest tylko `3gpp-lac-ci`.
 
 ## Budowanie
 
