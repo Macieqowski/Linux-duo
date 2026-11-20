@@ -40,25 +40,26 @@ def log(msg):
 
 
 # --- mixer ---
-def amixer(lines):
-    """Run cset/cget commands in one amixer process (amixer -s reads them from stdin)."""
-    r = subprocess.run(['amixer', '-c', CARD, '-s'], input='\n'.join(lines) + '\n', capture_output=True, text=True)
+def amixer(args):
+    r = subprocess.run(['amixer', '-c', CARD] + args, capture_output=True, text=True)
     if r.returncode:
-        log('amixer failed: %s' % r.stderr.strip())
+        log('amixer %s failed: %s' % (' '.join(args), r.stderr.strip()))
     return r.stdout
 
 
 def cset(pairs):
-    amixer(["cset name='%s' %s" % (n, v) for n, v in pairs])
+    for n, v in pairs:  # one amixer per control: amixer -s (stdin) prints nothing for cget
+        amixer(['-q', 'cset', 'name=%s' % n, str(v)])
 
 
 def cget(names):
     """Current values (as amixer prints them: numbers, enum items by index) of the named controls."""
-    out, vals = amixer(["cget name='%s'" % n for n in names]), []
-    for block in out.split('numid=')[1:]:
-        m = re.search(r'^\s*: values=(\S+)', block, re.M)
-        vals.append(m.group(1) if m else None)
-    return dict(zip(names, vals)) if len(vals) == len(names) else {}
+    vals = {}
+    for n in names:
+        m = re.search(r'^\s*: values=(\S+)', amixer(['cget', 'name=%s' % n]), re.M)
+        if m:
+            vals[n] = m.group(1)
+    return vals
 
 
 # --- PipeWire ---
