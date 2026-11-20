@@ -370,13 +370,40 @@ ekranu bez korekty, liniowo pomiędzy punktami, poza nimi stała). Usługa czyta
 Obraz systemu tego pliku nie tworzy. Wcześniejsza krzywa `0.86@400,0.64@160` była zmierzona, gdy KWin jeszcze
 przyciemniał prawy ekran, i jest nieaktualna.
 
-Automatyczna jasność przy wygaszonych ekranach: gdy system wyłączył ekrany (bezczynność, przycisk zasilania,
-zamknięty telefon), sterownik podświetlenia DSI odrzuca zapis jasności (`EINVAL`). `duo-autobrightness` pisał przez
-`open().write()`, więc błąd wychodził dopiero przy zamykaniu pliku, poza obsługą błędów (w dzienniku 421 razy
-„OSError: [Errno 22] Invalid argument” od 12:01 do 14:52 2026-11-20), a usługa uznawała wartość za zapisaną.
-Po włączeniu ekranów jasność zostawała więc stara aż do następnej dużej zmiany światła, a różnica między zapisaną a
-prawdziwą wartością mogła wyglądać jak ruch suwaka i wstrzymać automatykę. Teraz odrzucony zapis nie liczy się jako
-zapisany, a usługa ponawia go co 2 s, aż ekran go przyjmie.
+### Automatyczna jasność i PowerDevil
+
+Po każdym włączeniu ekranów oba świeciły na 100 %, a suwak jasności Plasmy zawsze stał na maksimum (2026-11-20).
+Suwakiem, przygaszaniem po 30 s bezczynności i rozjaśnianiem przy włączeniu ekranu rządzi PowerDevil. Steruje on
+jednym podświetleniem: DSI-1, w D-Bus `org.kde.ScreenBrightness`, wyświetlacz `display0`, zakres 0–10000.
+`duo-autobrightness` pisał poziom automatyczny wprost do pliku jasności DSI-1, z pominięciem PowerDevil. Przy każdym
+włączeniu ekranów PowerDevil wpisywał więc z powrotem swoją wartość (1023, bo nikt jej u niego nie ustawił), a 30 s
+później przygaszenie do 30 % (308). Usługa brała obie zmiany za ruch suwaka i kopiowała je na DSI-2. Przy
+przygaszaniu i rozjaśnianiu PowerDevil nie wysyła żadnego sygnału D-Bus, a przy ruchu suwaka wysyła
+`BrightnessChanged` (sprawdzone `gdbus monitor`).
+
+Teraz, gdy PowerDevil działa:
+- poziom automatyczny idzie przez PowerDevil (`SetBrightnessWithContext` z kontekstem `duo-autobrightness`, bez
+  okienka na ekranie), więc suwak go pokazuje, a przygaszanie i rozjaśnianie zaczynają od niego zamiast od 1023;
+- DSI-2 co 300 ms kopiuje wartość DSI-1, kto by jej nie ustawił (automatyka, suwak, przygaszenie, rozjaśnienie), z
+  korektą z `/etc/duo/brightness-balance`, jeśli ten plik istnieje;
+- ruch suwaka usługa poznaje po sygnale `BrightnessChanged` z innym kontekstem (proces `gdbus monitor` uruchomiony
+  jako użytkownik sesji). Automatyka czeka wtedy, aż światło zmieni się mniej więcej trzykrotnie;
+- gdy PowerDevil pojawi się po starcie sesji, usługa od razu ustawia przez niego poziom automatyczny, więc po
+  uruchomieniu telefonu suwak i ekrany pokazują to samo.
+
+Sprawdzone na telefonie 2026-11-20: po restarcie usługi PowerDevil pokazywał 3084 z 10000 (poziom automatyczny), a
+oba ekrany 314 z 1023. Po wybudzeniu ekranów oba miały 316, czyli poziom automatyczny, nie 1023. Po 30 s oba zeszły
+do 96 (30 % z 316), a DSI-2 nadążał w ciągu jednej próbki (2 s). Przygaszanie i rozjaśnianie nie liczyły się już jako
+ruch suwaka.
+
+Bez PowerDevil (inna powłoka albo plik `/etc/duo/autobrightness-no-powerdevil`) usługa pisze oba podświetlenia sama
+i kopiuje ruch suwaka z jednego ekranu na drugi, jak wcześniej.
+
+Przy wygaszonych ekranach (bezczynność, przycisk zasilania, zamknięty telefon) sterownik podświetlenia DSI odrzuca
+zapis jasności (`EINVAL`). Jądro i tak zapamiętuje wartość, a sterownik panelu wysyła ją po włączeniu ekranu, więc
+odrzucony zapis liczy się jako zapisany. Wcześniej usługa pisała przez `open().write()` i błąd wychodził dopiero przy
+zamykaniu pliku, poza obsługą błędów (w dzienniku 421 razy „OSError: [Errno 22] Invalid argument” od 12:01 do 14:52
+2026-11-20).
 
 ## Czujniki
 
