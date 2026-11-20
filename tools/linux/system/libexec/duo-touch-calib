@@ -239,7 +239,7 @@ function screenWindow(monitor) {
     });
     area.add_controller(g);
     // a long press stops the measurement (the buttons are hidden while it runs)
-    const lp = new Gtk.GestureLongPress({delay_factor: 3.0});
+    const lp = new Gtk.GestureLongPress({delay_factor: 2.0});  // 2.0 is the most GTK takes (~1 s)
     lp.connect('pressed', () => {
         if (st.phase !== 'measure')
             return;

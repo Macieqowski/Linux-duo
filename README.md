@@ -427,17 +427,20 @@ Wynik na telefonie 2026-11-20 (19:44–19:53):
   samą jak urządzenia iptsd. Po ponownym uruchomieniu usługi KWin wziął je od razu z `kcminputrc`.
 - **Kalibracja, oś pozioma:** krzyżyk 6 % od bocznej krawędzi był odczytywany przy ok. 1,1 %, a 94 % przy ok.
   99,05 %. Tak było na obu ekranach i powtarzalnie (DSI-1 zmierzony dwa razy: 1,07 i 1,08 %).
-- **Kalibracja, oś pionowa:** na DSI-1 góra 4,1–4,9 %, dół 99,1 %. DSI-2 był mierzony w oknie zmaksymalizowanym
-  między paskami (529×648 zamiast 529×706), bo KWin nie dał mu pełnego ekranu. Oś pozioma jest tam dobra, a pion
-  przeliczony na ekran (okno 22 px od góry): krzyżyk przy 8,6 % odczytany przy 9,4 %, przy 89,4 % odczytany
-  przy 90,2 %.
+- **Kalibracja, oś pionowa:** na DSI-1 góra 4,1–4,9 %, dół 99,1 %. Na DSI-2 (pomiar końcowy, 20:08) góra 3,5 %,
+  dół 99,0 %, a w poziomie 1,1 % i 99,05 %, jak na lewym.
 - **Środek ekranu:** w granicach ok. 1 %.
-- **Średni błąd bez korekcji** (piksele logiczne, ekran 529×706): DSI-1 22–23 px (najwyżej 45), DSI-2 17 px
-  (najwyżej 29).
+- **Średni błąd bez korekcji** (piksele logiczne, ekran 529×706): DSI-1 22–23 px (najwyżej 45), DSI-2 22 px
+  (najwyżej 45). Na DSI-2 przez tymczasową mapę było już tylko 6 px (najwyżej 14).
+
+Prawy ekran trzeba było mierzyć trzy razy:
+1. Najpierw KWin trzymał okno zmaksymalizowane między paskami (529×648 zamiast 529×706), a aplikacja po 4 s i tak
+   mierzyła.
+2. Przy powtórce KWin otworzył okno prawego ekranu na lewym, więc dane lewego zapisały się jako prawy (cofnięte).
+3. Za trzecim razem dolne krzyżyki otwierały dolny panel (opis niżej).
 
 Od tej pory aplikacja mierzy tylko w oknie na cały ekran i tylko na tym ekranie, który ma mierzyć. Który to ekran,
-sprawdza po zdarzeniu `enter-monitor` okna, bo oba ekrany mają ten sam rozmiar. Przy powtórce prawego ekranu KWin
-otworzył jego okno na lewym i dane lewego zapisały się jako prawy; zostały cofnięte. Co 1,5 s aplikacja ponawia prośbę
+sprawdza po zdarzeniu `enter-monitor` okna, bo oba ekrany mają ten sam rozmiar. Co 1,5 s aplikacja ponawia prośbę
 o pełny ekran na właściwym ekranie, a po 9 s bez niego nie mierzy i prosi o „Jeszcze raz”. Tylko jeden ekran:
 `/usr/libexec/duo/duo-touch-calib DSI-2`.
 
