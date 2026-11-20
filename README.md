@@ -22,7 +22,7 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | GPU (Adreno 640) | działa | Mesa freedreno/turnip z backports |
 | Wi-Fi, Bluetooth | działa | ath10k / hci_qca |
 | Dane komórkowe (LTE) | działa | modem + IPA v4.1 + ModemManager |
-| **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`. Bez głośnomówiącego, dzwonka i wibracji |
+| **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`, [dzwonek z wibracją i budzeniem ekranu](#dzwonek-wibracja-i-budzenie-ekranu) (test w toku). Bez głośnomówiącego |
 | Głośnik, mikrofony | działa | WCD9340 + WSA8815, strojenie z ACDB telefonu. Na 7.3.5 głośnik milczał: [naprawione trasą w DT](#głośnik-cisza-na-735) |
 | Słuchawka do rozmów | działa | wyjście EAR kodeka (`0076`–`0079`); w rozmowie gra przez DSP ([dźwięk rozmowy](#dźwięk-rozmowy-q6voice)), [ciszej niż głośnik](#słuchawka-do-rozmów-wyjście-ear) |
 | Czujniki, zawias, obrót | działa | SLPI + hexagonrpcd + libssc (budowane w obrazie) |
@@ -202,8 +202,39 @@ diagnostycznej: `/lib/modules/$(uname -r)/updates/q6voice` (po `depmod`) i `/etc
 z `options q6voice cvs_unmute=1 tx_topo_override=0x10f70` oraz `options q6cvp fix_rx_map=1`. Jądro z tego repo
 tego nie potrzebuje.
 
-Do zrobienia: przełączanie na głośnik (tryb głośnomówiący), głośność rozmowy z suwaka, dzwonek z wibracją, VoLTE,
-drugi kanał mikrofonu w UCM na `DMIC1` zamiast `DMIC3`.
+Do zrobienia: przełączanie na głośnik (tryb głośnomówiący), głośność rozmowy z suwaka, tłumienie echa i szumów,
+VoLTE, drugi kanał mikrofonu w UCM na `DMIC1` zamiast `DMIC3`. Dzwonek i wibracja:
+[niżej](#dzwonek-wibracja-i-budzenie-ekranu).
+
+## Dzwonek, wibracja i budzenie ekranu
+
+Plasma Dialer przy połączeniu przychodzącym tylko raz odtwarza dźwięk powiadomienia, nie wibruje i nie włącza
+wygaszonych ekranów. Dlatego od sygnału dzwonienia do odebrania, odrzucenia albo końca połączenia robi to
+`duo-call-audio`:
+
+- budzi ekrany (`duo-wake`, niżej);
+- odtwarza dzwonek w pętli jako użytkownik sesji (`paplay`,
+  `/usr/share/sounds/ocean/stereo/phone-incoming-call.oga`);
+- wibruje 1 s co 2 s przez `hfd-service` (`com.lomiri.hfd.Vibrator`, efekt `FF_RUMBLE`).
+
+Gdy obiekt połączenia w ModemManagerze znika, dzwonek gra jeszcze 2,5 s, bo zwykle od razu pojawia się nowy. Obraz
+systemu wyłącza dźwięk zdarzenia `ringing` w `~/.config/plasma-dialer.notifyrc` (okienko zostaje), żeby dzwonek nie
+grał podwójnie. Ustawienia w `/etc/default/duo-call-audio`: `DUO_CALL_RINGTONE` (plik dzwonka, pusty = bez dzwonka),
+`DUO_CALL_VIBRATE=0` (bez wibracji), `DUO_CALL_WAKE=0` (bez budzenia).
+
+Budzenie: KWin włącza wyłączone ekrany (DPMS, po bezczynności albo przyciskiem zasilania) przy naciśnięciu dowolnego
+klawisza, a `org.freedesktop.ScreenSaver.SimulateUserActivity` ich nie włącza (sprawdzone). `duo-wake` tworzy więc na
+chwilę klawiaturę uinput z jednym klawiszem `KEY_WAKEUP` i naciska go raz (KWin nie traktuje jej jak sprzętowej
+klawiatury). Ekrany budzą się:
+
+- przy połączeniu przychodzącym (`duo-call-audio`);
+- przy powiadomieniu o zwykłej albo krytycznej pilności: usługa `duo-wake` śledzi
+  `org.freedesktop.Notifications.Notify` na szynie sesji, budzi najwyżej raz na 3 s;
+  wyłączenie: `touch /etc/duo/wake-notify-off`;
+- przy otwarciu telefonu albo zmianie ułożenia (`duo-posture`, tryb jednego lub dwóch ekranów).
+
+Gdy telefon jest zamknięty (`/run/duo-posture.state`), połączenia i powiadomienia nie budzą ekranów. Test na
+telefonie: w toku.
 
 ## Jasność: lewy ekran jaśniejszy
 
@@ -216,6 +247,12 @@ podświetlenia 0–1023 ekranu bez korekty, liniowo pomiędzy punktami, poza nim
 przy 400 równe przy 86 %, przy 160 przy 64 %). Inny egzemplarz telefonu może potrzebować innych wartości (`1.0` = bez
 zmian); usługa czyta plik przy każdej zmianie jasności, więc wystarczy go poprawić i ruszyć suwakiem albo zrestartować
 usługę.
+
+Android na Duo (biblioteka `lights.msmnile.so`) przelicza jasność z suwaka na nity, a dla każdego panelu ma fabryczną
+tabelę nity -> wartość podświetlenia (partycja `sfpd`, `display/FactoryOs_LUT2_0.txt` i `_1.txt`). Na testowanym
+egzemplarzu obie tabele różnią się najwyżej o ok. 1 % (30 nitów: 164,1 i 163,9), a polecenia startowe obu paneli w DT
+Androida są takie same jak w sterowniku `panel-microsoft-surface-duo`. Fabrycznie panele świecą więc przy tej samej
+wartości tak samo i przyczyna różnicy w Linuksie jest gdzie indziej (sprawdzane).
 
 ## Wibracje: reset telefonu przy „sile wibracji”
 
