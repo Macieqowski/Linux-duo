@@ -73,6 +73,9 @@ grep -q '^WWANEnabled' /var/lib/NetworkManager/NetworkManager.state 2>/dev/null 
 
 # both screens: duo-hw switches the second panel (DSI-2) off unless /etc/duo/dual exists (or duo.dual=1)
 mkdir -p /etc/duo && touch /etc/duo/dual
+# brightness balance (2026-11-20): at the same backlight value the left panel (DSI-1) is brighter; side by side, 86 % of
+# the right one looks the same. duo-autobrightness applies it to its own writes and to the slider copy
+[ -f /etc/duo/brightness-balance ] || echo 'ae94000.dsi.0=0.86' > /etc/duo/brightness-balance
 
 # touch under KWin: the digitizer (landscape) -> portrait panel, one digitizer per panel (measured by linuxduobench)
 cat > /home/user/.config/kcminputrc << 'KCM'

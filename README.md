@@ -205,6 +205,15 @@ tego nie potrzebuje.
 Do zrobienia: przełączanie na głośnik (tryb głośnomówiący), głośność rozmowy z suwaka, dzwonek z wibracją, VoLTE,
 drugi kanał mikrofonu w UCM na `DMIC1` zamiast `DMIC3`.
 
+## Jasność: lewy ekran jaśniejszy
+
+Oba panele dostają tę samą wartość podświetlenia, ale lewy (DSI-1, `ae94000.dsi.0`) świeci przy niej trochę jaśniej.
+`duo-autobrightness` mnoży jasność każdego ekranu przez współczynnik z `/etc/duo/brightness-balance` (jedna linia na
+ekran, np. `ae94000.dsi.0=0.86`), także gdy kopiuje wartość z suwaka na drugi ekran. 0,86 wyszło z porównania obok
+siebie (2026-11-20: lewy ekran w krokach 100/93/86/80 % prawego, przy 86 % wyglądały tak samo) i obraz systemu ustawia
+je domyślnie. Inny egzemplarz telefonu może potrzebować innej wartości (`1.0` = bez zmian); usługa czyta plik przy
+każdej zmianie jasności, więc wystarczy go poprawić i ruszyć suwakiem albo zrestartować usługę.
+
 ## Wibracje: reset telefonu przy „sile wibracji”
 
 Sterownik `da7280` (także w czystym 7.3.5) zgłasza obsługę `FF_GAIN`, ale nie ma funkcji `set_gain`. Jądro wywołuje
