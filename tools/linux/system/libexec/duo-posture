@@ -9,7 +9,12 @@
 # commit timeout every ~90 ms, the whole UI at ~10 fps (2026-11-19). The outputs stay as they are for KWin.
 # Touch: KWin's input devices of the session user (D-Bus). Runs as root (duo-posture.service; the backlights are
 # root's). The hinge angle: duo-hinge (libssc). Hysteresis 10/20 and 330/310 deg. Off: touch /etc/duo/posture-off
+# Opening: when the system has already turned the screens off (DPMS: idle or the power key), the backlight write fails
+# (I/O error) - duo-wake wakes them first (2026-11-20). The posture is kept in /run/duo-posture.state for duo-wake
+# (no wake at calls/notifications while closed).
 H=/usr/libexec/duo/duo-hinge
+WAKE=/usr/libexec/duo/duo-wake
+STATE=/run/duo-posture.state
 LOG=/run/duo-posture.log
 log() { echo "$(date +%T) $*" >> "$LOG"; }
 [ -f /etc/duo/posture-off ] && { log "off (/etc/duo/posture-off)"; exit 0; }
@@ -35,6 +40,8 @@ touch_set() { # <name pattern> <true|false>
 panel() { [ -w "$1/bl_power" ] && echo "$2" > "$1/bl_power"; }   # 0 = on, 4 = off
 
 apply() {
+	echo "$1" > "$STATE"
+	case $1 in single|dual) [ -x "$WAKE" ] && "$WAKE" --force "posture $1" >> "$LOG" 2>&1 ;; esac
 	case $1 in
 	closed) panel $BL1 4; panel $BL2 4; touch_set "$LEFT" false; touch_set "$RIGHT" false ;;
 	single) panel $BL2 0; panel $BL1 4; touch_set "$RIGHT" true; touch_set "$LEFT" false ;;

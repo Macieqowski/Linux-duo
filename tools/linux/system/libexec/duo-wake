@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Surface Duo screen wake (2026-11-20). README: "Dzwonek, wibracja i budzenie ekranu".
+
+KWin turns screens that are off (DPMS, after idle or the power key) back on at any key press; the session's
+org.freedesktop.ScreenSaver.SimulateUserActivity does not wake them (tested). So a wake is one KEY_WAKEUP press through
+a short-lived uinput keyboard (only that key: KWin does not count it as a hardware keyboard).
+
+  duo-wake                  wake the screens if they are off, unless the phone is closed (/run/duo-posture.state)
+  duo-wake --force          also when closed (duo-posture, when the phone opens)
+  duo-wake --notifications  daemon (duo-wake.service): wake at each desktop notification of normal or critical urgency
+                            (org.freedesktop.Notifications.Notify on the session bus); off: /etc/duo/wake-notify-off
+Runs as root (/dev/uinput).
+"""
+import fcntl, glob, json, os, pwd, struct, subprocess, sys, time
+
+POSTURE = '/run/duo-posture.state'
+NOTIFY_OFF = '/etc/duo/wake-notify-off'
+UI_SET_EVBIT, UI_SET_KEYBIT, UI_DEV_SETUP, UI_DEV_CREATE, UI_DEV_DESTROY = (0x40045564, 0x40045565, 0x405c5503,
+                                                                             0x5501, 0x5502)
+EV_SYN, EV_KEY, KEY_WAKEUP = 0, 1, 143
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def screens_off():
+    """True if a DSI panel is off (DPMS); the posture's backlight-only blanking does not count."""
+    for p in glob.glob('/sys/class/drm/card*-DSI-*/dpms'):
+        try:
+            if open(p).read().strip() == 'Off':
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def closed():
+    try:
+        return open(POSTURE).read().strip() == 'closed'
+    except OSError:
+        return False
+
+
+def key_wakeup():
+    fd = os.open('/dev/uinput', os.O_WRONLY | os.O_NONBLOCK)
+    try:
+        fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
+        fcntl.ioctl(fd, UI_SET_KEYBIT, KEY_WAKEUP)
+        fcntl.ioctl(fd, UI_DEV_SETUP, struct.pack('HHHH80sI', 0x06, 0x045e, 0x0d00, 1, b'duo-wake', 0))
+        fcntl.ioctl(fd, UI_DEV_CREATE)
+        time.sleep(1.0)  # libinput/KWin pick the new device up through udev
+        for code, val in ((KEY_WAKEUP, 1), (0, 0), (KEY_WAKEUP, 0), (0, 0)):
+            os.write(fd, struct.pack('llHHi', 0, 0, EV_KEY if code else EV_SYN, code, val))
+        for _ in range(20):  # until KWin has the panels on again (max 2 s), then the device can go
+            time.sleep(0.1)
+            if not screens_off():
+                break
+        fcntl.ioctl(fd, UI_DEV_DESTROY)
+    finally:
+        os.close(fd)
+
+
+def wake(force=False, why=''):
+    if not screens_off():
+        return False
+    if closed() and not force:
+        log('screens off, phone closed: no wake (%s)' % why)
+        return False
+    key_wakeup()
+    log('woke the screens (%s): %s' % (why, 'on' if not screens_off() else 'still off'))
+    return True
+
+
+def session_user():
+    for d in sorted(os.listdir('/run/user')) if os.path.isdir('/run/user') else []:
+        if d != '0' and os.path.exists('/run/user/%s/bus' % d):
+            try:
+                return pwd.getpwuid(int(d))
+            except (KeyError, ValueError):
+                pass
+    return None
+
+
+def notifications():
+    """Wake at desktop notifications: busctl monitor on the session bus, as the session's user."""
+    log('waking the screens at notifications')
+    while True:
+        u = session_user()
+        if not u:
+            time.sleep(5)
+            continue
+        env = {'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/%d/bus' % u.pw_uid, 'PATH': '/usr/bin:/bin',
+               'HOME': u.pw_dir, 'XDG_RUNTIME_DIR': '/run/user/%d' % u.pw_uid}
+        mon = subprocess.Popen(['busctl', '--user', 'monitor', '--json=short', '--match',
+                                "type='method_call',interface='org.freedesktop.Notifications',member='Notify'"],
+                               user=u.pw_uid, group=u.pw_gid, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True)
+        last = 0.0
+        for line in mon.stdout:
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if m.get('member') != 'Notify' or os.path.exists(NOTIFY_OFF):
+                continue
+            data = (m.get('payload') or {}).get('data') or []
+            app = data[0] if data and isinstance(data[0], str) else '?'
+            hints = data[6] if len(data) > 6 and isinstance(data[6], dict) else {}
+            urgency = hints.get('urgency', {}).get('data', 1) if isinstance(hints.get('urgency'), dict) else 1
+            if urgency == 0 or time.monotonic() - last < 3:  # low urgency, or a burst
+                continue
+            last = time.monotonic()
+            wake(why='notification from %s' % app)
+        mon.wait()
+        time.sleep(5)  # the session ended (log out, restart): find it again
+
+
+def main():
+    if '--notifications' in sys.argv:
+        return notifications()
+    wake(force='--force' in sys.argv, why=' '.join(sys.argv[1:]) or 'request')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -36,24 +36,44 @@ def backlights():
     return sorted(glob.glob("/sys/class/backlight/*"))
 
 # BALANCE (2026-11-08: one screen looked brighter than the other): the two AMOLED panels are not equally bright
-# at the same DCS value (this phone: the left one, DSI-1 = ae94000.dsi.0, clearly brighter on camera). Per-panel factor,
-# one line per backlight: /etc/duo/brightness-balance  "ae94000.dsi.0=0.8" (1.0 = as is; missing file = no balance).
+# at the same DCS value (this phone: the left one, DSI-1 = ae94000.dsi.0). Per-panel factor, one line per backlight in
+# /etc/duo/brightness-balance: "ae94000.dsi.0=0.86" (1.0 = as is; missing file = no balance), or a curve when the
+# panels differ more at low brightness (2026-11-20): "ae94000.dsi.0=0.86@400,0.76@160" = factor at that backlight
+# value (of 1023) of the unbalanced screen, linear in between, flat outside.
 BALANCE_FILE = "/etc/duo/brightness-balance"
-def gain(b):
+def gain(b, level):
     try:
         for line in open(BALANCE_FILE):
             k, _, f = line.strip().partition("=")
-            if k == os.path.basename(b) and f:
-                return min(1.0, max(0.2, float(f)))
+            if k != os.path.basename(b) or not f:
+                continue
+            pts = []
+            for part in f.split(","):
+                g, _, at = part.strip().partition("@")
+                pts.append((float(at) / 1023.0 if at else 0.0, min(1.0, max(0.2, float(g)))))
+            pts.sort()
+            if level <= pts[0][0]:
+                return pts[0][1]
+            for (l0, g0), (l1, g1) in zip(pts, pts[1:]):
+                if level <= l1:
+                    return g0 + (g1 - g0) * (level - l0) / (l1 - l0)
+            return pts[-1][1]
     except (OSError, ValueError):
         pass
     return 1.0
+
+def unbalanced(b, v, mx):
+    """the common (unbalanced) level that gives value v on screen b"""
+    lv = v / mx
+    for _ in range(4):
+        lv = v / mx / gain(b, lv)
+    return min(1.0, lv)
 
 def write(level):
     for b in backlights():
         try:
             mx = int(open(b + "/max_brightness").read())
-            v = max(1, round(level * gain(b) * mx))
+            v = max(1, round(level * gain(b, level) * mx))
             cur = int(open(b + "/brightness").read())
             if v != cur:                         # each write is a command to the panel: only real changes
                 open(b + "/brightness", "w").write(str(v))
@@ -77,11 +97,12 @@ def mirror():
                 if o != b:
                     try:
                         omx = int(open(o + "/max_brightness").read())
-                        ov = max(1, min(omx, round(v / mx / gain(b) * gain(o) * omx)))
+                        lv = unbalanced(b, v, mx)
+                        ov = max(1, min(omx, round(lv * gain(o, lv) * omx)))
                         open(o + "/brightness", "w").write(str(ov)); state["written"][o] = ov
                     except OSError:
                         pass
-            state["set"] = min(1.0, v / mx / gain(b))
+            state["set"] = unbalanced(b, v, mx)
             state["manual_ll"] = state.get("ll")   # automatic pauses until the light changes a lot
             print("slider %s -> %d %% on both screens" % (os.path.basename(b), round(100 * v / mx)), flush=True)
             break

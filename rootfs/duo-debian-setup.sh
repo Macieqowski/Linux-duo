@@ -73,9 +73,10 @@ grep -q '^WWANEnabled' /var/lib/NetworkManager/NetworkManager.state 2>/dev/null 
 
 # both screens: duo-hw switches the second panel (DSI-2) off unless /etc/duo/dual exists (or duo.dual=1)
 mkdir -p /etc/duo && touch /etc/duo/dual
-# brightness balance (2026-11-20): at the same backlight value the left panel (DSI-1) is brighter; side by side, 86 % of
-# the right one looks the same. duo-autobrightness applies it to its own writes and to the slider copy
-[ -f /etc/duo/brightness-balance ] || echo 'ae94000.dsi.0=0.86' > /etc/duo/brightness-balance
+# brightness balance (2026-11-20): at the same backlight value the left panel (DSI-1) is brighter, more so when dim;
+# side by side the left looked the same at 86 % of the right at 400 and at 64 % at 160. duo-autobrightness applies it
+# to its own writes and to the slider copy
+[ -f /etc/duo/brightness-balance ] || echo 'ae94000.dsi.0=0.86@400,0.64@160' > /etc/duo/brightness-balance
 
 # touch under KWin: the digitizer (landscape) -> portrait panel, one digitizer per panel (measured by linuxduobench)
 cat > /home/user/.config/kcminputrc << 'KCM'
@@ -87,6 +88,9 @@ OutputName=DSI-2
 CalibrationMatrix=0,-1,1,0,-1,0,1,0,0,0,1,0,0,0,0,1
 OutputName=DSI-1
 KCM
+# the incoming call rings through duo-call-audio (ringtone loop + vibration + screen wake): the dialer's own one-shot
+# ringing sound is switched off, its notification (answer / decline) stays (2026-11-20)
+printf '[Event/ringing]\nAction=Popup\n\n[Event/ringing-without-popup]\nAction=\n' > /home/user/.config/plasma-dialer.notifyrc
 chown -R user:user /home/user/.config
 
 # the initramfs keeps the whole userdata partition at /mnt/duo-part (duo.rootdir=debian); the duo services look for

@@ -6,11 +6,14 @@ Holding the q6voice VoiceMMode1 PCM open in both directions starts the ADSP voic
 vocproc -> earpiece); no audio data passes through it. ModemManager has no audio policy, so this daemon follows its
 calls: ringing-in/dialing -> add the earpiece path on the codec (speaker kept for the ringtone); active (and
 ringing-out) -> drop the speaker path, open and start the voice PCM; no call left -> close it, restore the speaker.
+While an incoming call rings (and no other call is up) it also plays the ringtone in a loop, vibrates (hfd-service)
+and wakes the screens (duo-wake): the dialer itself only plays its notification sound once and neither vibrates nor
+wakes the screens.
 The codec must be routed to the earpiece a while before the voice start (else the downlink stays deaf until a
 re-open), routes change only with PipeWire's sink/source suspended, the TX topology is NONE (SM_ECNS needs ACDB
 calibration). Settings: /etc/default/duo-call-audio (DUO_CALL_* environment variables below).
 """
-import ctypes, os, pwd, re, select, signal, subprocess, sys, time
+import ctypes, os, pwd, re, select, shutil, signal, subprocess, sys, time
 
 CARD = os.environ.get('DUO_CALL_CARD', 'SurfaceDuo')
 VOICE_PCM = os.environ.get('DUO_CALL_PCM', 'VoiceMMode1')
@@ -26,6 +29,11 @@ MIC_VOLUME = os.environ.get('DUO_CALL_MIC_VOLUME', '98')
 MIC_BOOST_DB = int(os.environ.get('DUO_CALL_MIC_BOOST', '6'))  # with DUO_CALL_MIC_VOLUME empty: added to DEC7
 # open the voice path already while an outgoing call rings (network ringback tone) instead of at answer
 OPEN_ON_RINGING_OUT = os.environ.get('DUO_CALL_OPEN_RINGING_OUT', '1') == '1'
+# the incoming call: ringtone (looped; empty = none), vibration, screen wake
+RINGTONE = os.environ.get('DUO_CALL_RINGTONE', '/usr/share/sounds/ocean/stereo/phone-incoming-call.oga')
+VIBRATE = os.environ.get('DUO_CALL_VIBRATE', '1') == '1'
+WAKE = os.environ.get('DUO_CALL_WAKE', '1') == '1'
+RING_GRACE = 2.5  # keep ringing this long when the ringing Call object vanishes (a new one often follows)
 TX_TOPOLOGY_NONE = 0x10F70
 UNANSWERED_GRACE = 6.0  # the first incoming Call object often vanishes 1-3 s after ringing; a new one follows
 
@@ -231,6 +239,56 @@ class CallAudio:
         log('speaker routed back')
 
 
+# --- ringing ---
+class Ringer:
+    """Ringtone loop (as the session's user, PipeWire's default sink), vibration loop and one screen wake."""
+    def __init__(self):
+        self.procs = []
+        self.off_since = None
+
+    @property
+    def on(self):
+        return bool(self.procs)
+
+    def start(self):
+        self.off_since = None
+        if self.procs:
+            return
+        if WAKE and os.path.exists('/usr/libexec/duo/duo-wake'):
+            subprocess.Popen(['/usr/libexec/duo/duo-wake', 'incoming call'], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        u = session_user()
+        player = shutil.which('paplay') or shutil.which('pw-play')
+        if u and RINGTONE and player and os.path.exists(RINGTONE):
+            env = {'XDG_RUNTIME_DIR': '/run/user/%d' % u.pw_uid, 'PATH': '/usr/bin:/bin', 'HOME': u.pw_dir}
+            self.procs.append(subprocess.Popen(['sh', '-c', 'while :; do "$0" "$1"; sleep 1; done', player, RINGTONE],
+                                               user=u.pw_uid, group=u.pw_gid, env=env, start_new_session=True,
+                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        if VIBRATE:
+            self.procs.append(subprocess.Popen(
+                ['sh', '-c', 'while :; do busctl call com.lomiri.hfd /com/lomiri/hfd com.lomiri.hfd.Vibrator vibrate '
+                 'i 1000; sleep 2; done'], start_new_session=True, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL))
+        log('ringing (ringtone %s, vibration %s)' % ('on' if len(self.procs) > VIBRATE else 'off', VIBRATE))
+
+    def stop(self):
+        self.off_since = None
+        for p in self.procs:
+            try:
+                os.killpg(p.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            p.wait()
+        if self.procs:
+            log('ringing stopped')
+        self.procs = []
+
+
+def ringing(calls):
+    states = {s for s, _ in calls.values()}
+    return RINGING_IN in states and not states & {ACTIVE, HELD, DIALING, RINGING_OUT}
+
+
 # --- ModemManager ---
 def list_calls():
     """{call path: (state, direction)} from mmcli."""
@@ -276,7 +334,7 @@ def monitor():
 
 
 def main():
-    ca, stop = CallAudio(), []
+    ca, ringer, stop = CallAudio(), Ringer(), []
     signal.signal(signal.SIGTERM, lambda *x: stop.append(1))
     signal.signal(signal.SIGINT, lambda *x: stop.append(1))
     try:
@@ -287,7 +345,7 @@ def main():
     calls, idle_since, refresh, retry_at, buf = {}, None, True, 0.0, b''
     log('watching calls (voice path at ringing-out: %s)' % OPEN_ON_RINGING_OUT)
     while not stop:
-        timeout = 1.0 if mon is None else (5.0 if ca.mode != 'idle' else 30.0)
+        timeout = 1.0 if mon is None or ringer.on else (5.0 if ca.mode != 'idle' else 30.0)
         if mon is None:
             time.sleep(timeout)
             refresh = True
@@ -311,11 +369,20 @@ def main():
         if refresh:
             calls, refresh = list_calls(), False
         want, now = wanted(calls), time.monotonic()
+        if ringer.on and not ringing(calls):  # answered or another call up: at once; gone: after a grace
+            if want == 'voice' or {st for st, _ in calls.values()} & {ACTIVE, HELD, DIALING, RINGING_OUT}:
+                ringer.stop()
+            elif ringer.off_since is None:
+                ringer.off_since = now
+            elif now - ringer.off_since >= RING_GRACE:
+                ringer.stop()
         if want == 'voice' and ca.mode != 'voice' and now >= retry_at:
             if not ca.voice_on():
                 retry_at = now + 2.0  # the modem's voice session may not exist yet: try again
         elif want == 'pre' and ca.mode == 'idle':
             ca.preroute()
+        if ringing(calls):  # after the pre-route: it suspends the sink for a moment
+            ringer.start()
         if want == 'idle' and ca.mode != 'idle':
             if ca.mode == 'voice' or (idle_since is not None and now - idle_since >= UNANSWERED_GRACE):
                 ca.restore()
@@ -324,6 +391,7 @@ def main():
                 idle_since = now
         else:
             idle_since = None
+    ringer.stop()
     if ca.mode != 'idle':
         ca.restore()
     if mon is not None:
