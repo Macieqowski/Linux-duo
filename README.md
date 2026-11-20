@@ -286,7 +286,8 @@ palców) przy takim geście bierze dla siebie każdy następny dotyk i każdą r
 żaden program Qt nie reaguje na dotyk, także ekran blokady. Swoje punkty filtr zapomina dopiero po ich podniesieniu
 albo po anulowaniu dotyku. Gdy palce, które zaczęły gest, zostaną podniesione przy wygaszonych ekranach, podniesienia
 zjada stojący przed nim filtr DPMS i gest zostaje „w toku” na zawsze. Tak może się zdarzyć przy zamykaniu telefonu, gdy
-ekrany dotykają się nawzajem. Odblokowanie, zablokowanie, wyłączenie i włączenie urządzeń dotyku nie pomagają.
+ekrany dotykają się nawzajem, albo gdy dłoń trzymająca telefon dotyka ekranu przy naciskaniu zasilania.
+Odblokowanie, zablokowanie, wyłączenie i włączenie urządzeń dotyku nie pomagają.
 
 Doraźnie: dotknij ekranu trzema palcami naraz i je podnieś (numery punktów, które filtr pamięta, się zwalniają).
 
@@ -295,8 +296,18 @@ gdy ekrany się zapalą, kładzie na nim palec na środku ekranu i zamienia go w
 wtedy anulowanie dotyku, KWin anuluje wszystkie dotyki i filtr gestów zaczyna od zera. Robi to dwa razy, bo zacięty
 filtr zatrzymuje pierwsze anulowanie u siebie. Program pod tym punktem dostaje tylko anulowany dotyk. Usługa czeka,
 aż żaden prawdziwy palec nie dotyka ekranów, i pisze w dzienniku „touch reset (screens on)”. Ręcznie:
-`duo-wake --touch-reset`, wyłączenie: `touch /etc/duo/touch-reset-off`. Test odtwarzający zacięcie:
-`tools/linux/system/test/touch-stuck-test.py`. Test na telefonie: w toku.
+`duo-wake --touch-reset`, wyłączenie: `touch /etc/duo/touch-reset-off`.
+
+Sprawdzone na telefonie 2026-11-20:
+- reset po zapaleniu ekranów przyciskiem, bez przypadkowych kliknięć;
+- odtworzone zacięcie bez udziału człowieka, z wyłączonym resetem: 3 palce testowego urządzenia uinput w dół,
+  ekrany zgasły po bezczynności przy odblokowanej sesji, palce podniesione przy wygaszonych ekranach. Stuknięcie
+  próbne nie dotarło do okna testowego, a po `duo-wake --touch-reset` dotarło.
+Zmiana stanu blokady, gdy palce są jeszcze na ekranie, sama czyści gest (KWin anuluje wtedy dotyki). Dlatego
+przycisk zasilania, który od razu blokuje telefon, zacina dotyk tylko wtedy, gdy palce zejdą z ekranu między
+wygaszeniem a blokadą. Prawdopodobnie tak było 2026-11-20 o 12:01 (dłoń na ekranie przy naciskaniu zasilania).
+`tools/linux/system/test/touch-stuck-test.py` (zasilanie zamiast bezczynności) zacięcia nie odtwarza, bo podnosi
+palce dopiero po blokadzie.
 
 ## Jasność: lewy ekran jaśniejszy
 

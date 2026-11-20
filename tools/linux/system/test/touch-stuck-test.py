@@ -9,6 +9,9 @@ so the gesture filter keeps the 3 points and from now on swallows all touch, as 
 When the screens come on again (power key), duo-wake should log "touch reset (screens on)" and touch should work.
 Without the reset, touch stays dead until a 3-finger touch (seat slots 0-2 lifted again) clears it.
 Prints a timeline. Writes nothing; the device goes when the script ends.
+Limit (2026-11-20): the power key locks the session at once, and a lock-state change while the test fingers are still
+down makes KWin cancel them, which clears the gesture. So this power-key variant does NOT reproduce the stuck state;
+the idle timeout with the session unlocked does (README "Dotyk przestaje działać").
 """
 import fcntl, glob, os, struct, sys, time
 
