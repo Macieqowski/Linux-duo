@@ -15,6 +15,18 @@ uinput keyboard that has only that key (not alphanumeric: KWin does not count it
 A new uinput device needs ~1 s before KWin (libinput, through udev) uses it, which made opening the phone feel slow
 (Maciej 2026-11-20): the daemon creates it once. Without the daemon a request makes its own device (the old 1 s path).
 A request returns once the screens are on (max 2 s). Runs as root (/dev/uinput).
+
+  duo-wake --touch-reset    clear a stuck touchscreen gesture in KWin now (needs the daemon)
+
+Touch reset (2026-11-20, README "Dotyk przestaje działać"): KWin 6.3's touchscreen gesture filter (3+ fingers) takes
+every later touch and every touch frame while it thinks a gesture is still going, and it forgets its points only on
+their touch-up or on a touch cancel. Touches that started a gesture and were lifted while the screens were off never
+reach it (KWin's DPMS filter is ahead and eats them), e.g. when the phone is closed and the screens press on each
+other. From then on no app and not even the lock screen get touch, until a 3+ finger touch. So after the screens come
+on again the daemon puts one finger down on its own small uinput touchscreen and turns it into a palm: libinput
+sends a touch cancel, KWin cancels all touches and the gesture filter starts clean (twice, see touch_reset). The app
+under the point gets only a cancelled touch. It waits until no real finger is down (iptsd's touchscreens). Off:
+/etc/duo/touch-reset-off.
 """
 import fcntl, glob, json, os, pwd, socket, struct, subprocess, sys, threading, time
 
@@ -24,6 +36,14 @@ SOCK = '/run/duo-wake.sock'
 UI_SET_EVBIT, UI_SET_KEYBIT, UI_DEV_SETUP, UI_DEV_CREATE, UI_DEV_DESTROY = (0x40045564, 0x40045565, 0x405c5503,
                                                                              0x5501, 0x5502)
 EV_SYN, EV_KEY, KEY_WAKEUP = 0, 1, 143
+TOUCH_RESET_OFF = '/etc/duo/touch-reset-off'
+UI_SET_ABSBIT, UI_SET_PROPBIT, UI_ABS_SETUP = 0x40045567, 0x4004556e, 0x401c5504
+EV_ABS, BTN_TOUCH, INPUT_PROP_DIRECT = 3, 0x14a, 1
+ABS_X, ABS_Y, ABS_MT_SLOT, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TOOL_TYPE, ABS_MT_TRACKING_ID = (
+    0x00, 0x01, 0x2f, 0x35, 0x36, 0x37, 0x39)
+MT_TOOL_FINGER, MT_TOOL_PALM = 0, 2
+TOUCH_W, TOUCH_H, TOUCH_RES = 1350, 1800, 20  # units, units per mm (about the size of one panel)
+EVIOCGMTSLOTS_64 = (2 << 30) | ((4 + 4 * 64) << 16) | (0x45 << 8) | 0x0a  # code + 64 slot values
 
 
 def log(msg):
@@ -79,6 +99,100 @@ class Keyboard:
             fcntl.ioctl(self.fd, UI_DEV_DESTROY)
         finally:
             os.close(self.fd)
+
+
+class TouchReset:
+    """a uinput touchscreen with one slot whose only job is a touch cancel in KWin (module docstring)"""
+
+    def __init__(self):
+        self.fd = os.open('/dev/uinput', os.O_WRONLY | os.O_NONBLOCK)
+        self.tid = 0
+        try:
+            for ev in (EV_KEY, EV_ABS):
+                fcntl.ioctl(self.fd, UI_SET_EVBIT, ev)
+            fcntl.ioctl(self.fd, UI_SET_KEYBIT, BTN_TOUCH)
+            fcntl.ioctl(self.fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT)
+            for code, top, res in ((ABS_X, TOUCH_W - 1, TOUCH_RES), (ABS_Y, TOUCH_H - 1, TOUCH_RES),
+                                   (ABS_MT_SLOT, 0, 0), (ABS_MT_POSITION_X, TOUCH_W - 1, TOUCH_RES),
+                                   (ABS_MT_POSITION_Y, TOUCH_H - 1, TOUCH_RES), (ABS_MT_TOOL_TYPE, MT_TOOL_PALM, 0),
+                                   (ABS_MT_TRACKING_ID, 65535, 0)):
+                fcntl.ioctl(self.fd, UI_SET_ABSBIT, code)
+                fcntl.ioctl(self.fd, UI_ABS_SETUP, struct.pack('HHiiiiii', code, 0, 0, 0, top, 0, 0, res))
+            fcntl.ioctl(self.fd, UI_DEV_SETUP, struct.pack('HHHH80sI', 0x06, 0x045e, 0x0d01, 1, b'duo-touch-reset', 0))
+            fcntl.ioctl(self.fd, UI_DEV_CREATE)
+        except OSError:
+            os.close(self.fd)
+            raise
+
+    def emit(self, events):
+        os.write(self.fd, b''.join(struct.pack('llHHi', 0, 0, t, c, v) for t, c, v in events + [(EV_SYN, 0, 0)]))
+
+    def cancel(self):
+        """finger down in the middle, then palm (libinput: touch cancel), then lifted"""
+        self.tid = (self.tid + 1) % 65536
+        x, y = TOUCH_W // 2, TOUCH_H // 2
+        self.emit([(EV_ABS, ABS_MT_SLOT, 0), (EV_ABS, ABS_MT_TRACKING_ID, self.tid),
+                   (EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER), (EV_ABS, ABS_MT_POSITION_X, x),
+                   (EV_ABS, ABS_MT_POSITION_Y, y), (EV_KEY, BTN_TOUCH, 1), (EV_ABS, ABS_X, x), (EV_ABS, ABS_Y, y)])
+        time.sleep(0.05)
+        self.emit([(EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_PALM)])
+        time.sleep(0.05)
+        # tool back to finger after the lift, so that the next touch starts as a finger (libinput palm state)
+        self.emit([(EV_ABS, ABS_MT_TRACKING_ID, -1), (EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER),
+                   (EV_KEY, BTN_TOUCH, 0)])
+
+
+def fingers_down():
+    """number of contacts down on the real touchscreens (iptsd's virtual devices)"""
+    n = 0
+    for name_path in glob.glob('/sys/class/input/event*/device/name'):
+        try:
+            name = open(name_path).read()
+            if 'IPTSD' not in name or 'Touchscreen' not in name:
+                continue
+            node = '/dev/input/' + name_path.split('/')[4]
+            fd = os.open(node, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            buf = bytearray(struct.pack('I', ABS_MT_TRACKING_ID) + struct.pack('64i', *([-1] * 64)))
+            fcntl.ioctl(fd, EVIOCGMTSLOTS_64, buf)
+            n += sum(1 for v in struct.unpack_from('64i', buf, 4) if v != -1)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+    return n
+
+
+def touch_reset(tr, why):
+    if os.path.exists(TOUCH_RESET_OFF):
+        return
+    end = time.monotonic() + 10
+    while fingers_down() and time.monotonic() < end:  # never cancel a real touch
+        time.sleep(0.2)
+    if fingers_down():
+        log('touch reset skipped (%s): a finger stays down' % why)
+        return
+    # Twice: if the gesture filter was stuck it swallows the first cancel (it ends there), so a touch the lock screen
+    # may have got from the first round is cancelled for the apps by the second.
+    tr.cancel()
+    time.sleep(0.1)
+    tr.cancel()
+    log('touch reset (%s)' % why)
+
+
+def touch_watch(reset):
+    """a touch reset each time the screens come on (all DSI panels out of DPMS off)"""
+    was_off = screens_off()
+    while True:
+        time.sleep(0.5)
+        off = screens_off()
+        if was_off and not off:
+            time.sleep(0.5)  # KWin drops its DPMS filter once all outputs are on
+            if not screens_off():
+                reset('screens on')
+        was_off = off
 
 
 def wake(kb, force=False, why=''):
@@ -173,6 +287,22 @@ def daemon():
                 log('wake failed (%s): %s' % (why, e))
 
     try:
+        tr = TouchReset()
+    except OSError as e:
+        tr = None
+        log('no touch reset device: %s' % e)
+    touch_lock = threading.Lock()
+
+    def do_touch_reset(why):
+        if tr is None:
+            return
+        with touch_lock:
+            try:
+                touch_reset(tr, why)
+            except OSError as e:
+                log('touch reset failed (%s): %s' % (why, e))
+
+    try:
         os.unlink(SOCK)
     except FileNotFoundError:
         pass
@@ -180,15 +310,29 @@ def daemon():
     srv.bind(SOCK)
     os.chmod(SOCK, 0o600)
     threading.Thread(target=notifications, args=(do_wake,), daemon=True).start()
+    threading.Thread(target=touch_watch, args=(do_touch_reset,), daemon=True).start()
     log('keyboard ready, requests on %s' % SOCK)
     while True:
-        force, _, why = srv.recv(512).decode(errors='replace').partition(':')
-        threading.Thread(target=do_wake, args=(force == 'force', why), daemon=True).start()
+        kind, _, why = srv.recv(512).decode(errors='replace').partition(':')
+        if kind == 'touch':
+            threading.Thread(target=do_touch_reset, args=(why or 'request',), daemon=True).start()
+        else:
+            threading.Thread(target=do_wake, args=(kind == 'force', why), daemon=True).start()
 
 
 def main():
     if '--notifications' in sys.argv:
         return daemon()
+    if '--touch-reset' in sys.argv:
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            s.connect(SOCK)
+            s.send(b'touch:request')
+            s.close()
+        except OSError as e:
+            print('duo-wake: the daemon does not run (%s)' % e, file=sys.stderr)
+            return 1
+        return 0
     force = '--force' in sys.argv
     why = ' '.join(a for a in sys.argv[1:] if a != '--force') or 'request'
     if not request(force, why):

@@ -17,12 +17,12 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | Funkcja | Stan w linuxduobench | Uwagi |
 |---|---|---|
 | Oba ekrany | działa | własny sterownik panelu, DSC |
-| Dotyk (multi-touch) | działa | spi-hid-duo + iptsd (budowany w obrazie) |
+| Dotyk (multi-touch) | działa | spi-hid-duo + iptsd (budowany w obrazie); obejście [zacinającego się gestu w KWin](#dotyk-przestaje-działać-zacięty-gest-w-kwin) |
 | Pióro | nie | jest w danych iptsd, nieskończone |
 | GPU (Adreno 640) | działa | Mesa freedreno/turnip z backports |
 | Wi-Fi, Bluetooth | działa | ath10k / hci_qca |
 | Dane komórkowe (LTE) | działa | modem + IPA v4.1 + ModemManager |
-| **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`, [dzwonek z wibracją i budzeniem ekranu](#dzwonek-wibracja-i-budzenie-ekranu), głośnik, wyciszenie i głośność rozmowy (test w toku). Bez tłumienia echa |
+| **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`, [dzwonek z wibracją i budzeniem ekranu](#dzwonek-wibracja-i-budzenie-ekranu), głośnik i wyciszenie (sprawdzone; ikony przycisków w dialerze się nie zmieniają), głośność rozmowy. Bez tłumienia echa |
 | Głośnik, mikrofony | działa | WCD9340 + WSA8815, strojenie z ACDB telefonu. Na 7.3.5 głośnik milczał: [naprawione trasą w DT](#głośnik-cisza-na-735) |
 | Słuchawka do rozmów | działa | wyjście EAR kodeka (`0076`–`0079`); w rozmowie gra przez DSP ([dźwięk rozmowy](#dźwięk-rozmowy-q6voice)), [ciszej niż głośnik](#słuchawka-do-rozmów-wyjście-ear) |
 | Czujniki, zawias, obrót | działa | SLPI + hexagonrpcd + libssc (budowane w obrazie) |
@@ -205,7 +205,13 @@ tego nie potrzebuje.
 
 Przyciski rozmowy w Plasma Dialer: dialer wysyła je do `callaudiod`, który nie ma profilu rozmowy dla tej karty.
 `duo-call-audio` śledzi więc sygnały `speakerModeChanged` i `muteChanged` usługi `org.kde.telephony.DialerUtils`
-(kde-telephony-daemon, szyna sesji) i sam ustawia kodek:
+(kde-telephony-daemon, szyna sesji) i sam ustawia kodek. Plasma Dialer 6.3.5 nie zna jednak stanu swoich przycisków:
+wtyczka QML przekazuje te sygnały bez argumentu, więc strona rozmowy (`CallPage.qml`: „Cannot assign [undefined] to
+bool”) nigdy nie zaznacza przycisku i każde naciśnięcie wysyła `setSpeakerMode(true)` / `setMute(true)`. Drugie
+naciśnięcie niczego w demonie nie zmieniało (sprawdzone w zapisie szyny D-Bus z rozmowy testowej). Usługa śledzi
+więc też same wywołania i `true` przy już włączonym stanie traktuje jako drugie naciśnięcie: wysyła do demona
+`false` (w dzienniku „speaker button pressed again: off”). Ikony przycisków w dialerze nadal się nie zmieniają; to
+wymagałoby przebudowania Plasma Dialer.
 
 - Głośnik: w rozmowie obie trasy zostają podłączone (słuchawka `RX INT0`, głośnik `RX INT7` -> `SpkrLeft`), a
   przełączenie zmienia tylko głośności cyfrowe (`RX0`/`RX7 Digital Volume`, 0 = -84 dB). Zmiana trasy przy otwartym
@@ -221,7 +227,9 @@ Przyciski rozmowy w Plasma Dialer: dialer wysyła je do `callaudiod`, który nie
 
 Ustawienia (`/etc/default/duo-call-audio`): `DUO_CALL_SPK_VOLUME`, `DUO_CALL_SPK_DMIC`, `DUO_CALL_SPK_MIC_VOLUME`,
 `DUO_CALL_VOLUME`, `DUO_CALL_SWITCH_REOPEN`. Echo nie jest tłumione (topologia `NONE`), więc na głośniku rozmówca
-może słyszeć siebie. Test na telefonie: w toku.
+może słyszeć siebie. Sprawdzone w rozmowie 2026-11-20: Głośnik włącza i wyłącza głośnik (powrót na słuchawkę),
+Wyciszenie wycisza i włącza mikrofon. W pierwszej rozmowie testowej nie działał żaden dotyk
+([zacięty gest w KWin](#dotyk-przestaje-działać-zacięty-gest-w-kwin)).
 
 Do zrobienia: tłumienie echa i szumów, VoLTE, drugi kanał mikrofonu w UCM na `DMIC1` zamiast `DMIC3`. Dzwonek i
 wibracja: [niżej](#dzwonek-wibracja-i-budzenie-ekranu).
@@ -259,6 +267,29 @@ się:
 Gdy telefon jest zamknięty (`/run/duo-posture.state`), połączenia i powiadomienia nie budzą ekranów. Sprawdzone na
 telefonie 2026-11-20: połączenie przychodzące przy wygaszonym ekranie (dzwonek, wibracja, ekran się włącza),
 powiadomienie (ekrany włączone po ok. 1 s) i otwarcie zablokowanego telefonu.
+
+## Dotyk przestaje działać (zacięty gest w KWin)
+
+Objaw (2026-11-20, po rozmowie i zamknięciu telefonu): ekrany świecą, ale żaden dotyk nic nie robi, ani na ekranie
+blokady, ani po odblokowaniu. Podwójne stuknięcie przy wygaszonych ekranach nadal je zapala. Dotyk dociera do KWin
+(iptsd i oba ekrany dotykowe działają, żaden palec nie wisi), ale KWin nie przekazuje go dalej.
+
+Przyczyna, w kodzie KWin 6.3.6 (`src/input.cpp`, `GlobalShortcutFilter`): filtr gestów ekranu dotykowego (3 i więcej
+palców) przy takim geście bierze dla siebie każdy następny dotyk i każdą ramkę dotyku (`touchFrame`). Bez ramek
+żaden program Qt nie reaguje na dotyk, także ekran blokady. Swoje punkty filtr zapomina dopiero po ich podniesieniu
+albo po anulowaniu dotyku. Gdy palce, które zaczęły gest, zostaną podniesione przy wygaszonych ekranach, podniesienia
+zjada stojący przed nim filtr DPMS i gest zostaje „w toku” na zawsze. Tak może się zdarzyć przy zamykaniu telefonu, gdy
+ekrany dotykają się nawzajem. Odblokowanie, zablokowanie, wyłączenie i włączenie urządzeń dotyku nie pomagają.
+
+Doraźnie: dotknij ekranu trzema palcami naraz i je podnieś (numery punktów, które filtr pamięta, się zwalniają).
+
+Poprawka: usługa `duo-wake` ma własny mały ekran dotykowy uinput (`duo-touch-reset`, jeden punkt). Za każdym razem,
+gdy ekrany się zapalą, kładzie na nim palec na środku ekranu i zamienia go w dłoń (`MT_TOOL_PALM`). libinput wysyła
+wtedy anulowanie dotyku, KWin anuluje wszystkie dotyki i filtr gestów zaczyna od zera. Robi to dwa razy, bo zacięty
+filtr zatrzymuje pierwsze anulowanie u siebie. Program pod tym punktem dostaje tylko anulowany dotyk. Usługa czeka,
+aż żaden prawdziwy palec nie dotyka ekranów, i pisze w dzienniku „touch reset (screens on)”. Ręcznie:
+`duo-wake --touch-reset`, wyłączenie: `touch /etc/duo/touch-reset-off`. Test odtwarzający zacięcie:
+`tools/linux/system/test/touch-stuck-test.py`. Test na telefonie: w toku.
 
 ## Jasność: lewy ekran jaśniejszy
 
