@@ -13,6 +13,10 @@ longer gets its events), creates a uinput clone with the same capabilities, name
 duo-posture / duo-call-audio, which match "Touchscreen 045E:0C0x", switch both), gives the clone the same udev
 WL_OUTPUT + matrix, and forwards every event, with the positions passed through a per-axis piecewise-linear map.
 If the daemon stops, the grab ends and the iptsd devices work as before (uncorrected).
+KWin does not take the screen from udev for a device it has settings for in ~/.config/kcminputrc (an empty
+OutputName there wins), so the iptsd device is grabbed only once KWin has mapped the clone onto the same screen: the
+daemon sets the clone's outputName, calibration matrix and enabled (as KWin has them for the iptsd device) through
+KWin's D-Bus, as the session's user; KWin keeps them in kcminputrc. Without a session (or KWin) the clone waits and the iptsd device stays in use.
 
 The map comes from /etc/duo/touch-calibration.json, written through the socket by the calibration app
 (duo-touch-calib): per screen and output axis, pairs [measured, target] in the output's 0..1 coordinates, measured
@@ -22,7 +26,7 @@ open, or until {"cmd":"normal"}), {"cmd":"save","screens":{"DSI-2":{"x":[[m,t],.
 screen), {"cmd":"reset","screens":["DSI-2"]} (no correction for those screens; no list = all), {"cmd":"status"}.
 Run as root (uinput, EVIOCGRAB): duo-touch-fix.service.
 """
-import fcntl, glob, json, os, select, socket, struct, subprocess, sys, time
+import fcntl, glob, json, os, pwd, re, select, socket, struct, subprocess, sys, time
 
 CONF = '/etc/duo/touch-calibration.json'
 SOCK = '/run/duo-touch-fix.sock'
@@ -65,6 +69,67 @@ def udev_props(node):
     return dict(l.split('=', 1) for l in out.stdout.splitlines() if '=' in l)
 
 
+def session_user():
+    """the logged-in desktop user (uid >= 1000 with a session bus), or None"""
+    for d in sorted(os.listdir('/run/user')) if os.path.isdir('/run/user') else []:
+        try:
+            u = pwd.getpwuid(int(d))
+        except (KeyError, ValueError):
+            continue
+        if 1000 <= u.pw_uid < 65534 and os.path.exists('/run/user/%d/bus' % u.pw_uid):
+            return u
+    return None
+
+
+def kwin(args, timeout=5):
+    """busctl --user ARGS against KWin, as the session's user; stdout, or None"""
+    u = session_user()
+    if not u:
+        return None
+    env = {'XDG_RUNTIME_DIR': '/run/user/%d' % u.pw_uid, 'PATH': '/usr/bin:/bin', 'HOME': u.pw_dir,
+           'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/%d/bus' % u.pw_uid}
+    try:
+        r = subprocess.run(['busctl', '--user'] + args, user=u.pw_uid, group=u.pw_gid, env=env, capture_output=True,
+                           text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def kwin_prop(event, prop, value=None):
+    """get (value None) or set an org.kde.KWin.InputDevice property of /dev/input/EVENT; get returns the value text"""
+    path = '/org/kde/KWin/InputDevice/' + event
+    if value is None:
+        out = kwin(['get-property', 'org.kde.KWin', path, 'org.kde.KWin.InputDevice', prop])
+        if out is None:
+            return None
+        m = re.match(r'\s*\w+\s+(.*)', out)
+        return m.group(1).strip().strip('"') if m else None
+    sig = 'b' if isinstance(value, bool) else 's'
+    v = ('true' if value else 'false') if isinstance(value, bool) else value
+    return kwin(['set-property', 'org.kde.KWin', path, 'org.kde.KWin.InputDevice', prop, sig, v]) is not None
+
+
+def matrix16(text):
+    """KWin's calibrationMatrix text -> 16 floats, or None"""
+    try:
+        v = [round(float(x), 5) for x in (text or '').split(',')]
+    except ValueError:
+        return None
+    return v if len(v) == 16 else None
+
+
+def event_of(name):
+    """eventN of the input device with this exact name, or None"""
+    for p in glob.glob('/sys/class/input/event*/device/name'):
+        try:
+            if open(p).read().strip() == name:
+                return p.split('/')[4]
+        except OSError:
+            pass
+    return None
+
+
 class Map:
     """piecewise-linear map on 0..1 through (0,0), the measured knots, (1,1)"""
 
@@ -101,6 +166,7 @@ class Dev:
         self.fd = os.open(node, os.O_RDONLY | os.O_NONBLOCK)
         self.ui = None
         self.grabbed = False
+        self.waiting = None  # what the grab waits for (logged once per change)
         try:
             self.evs = bits(self.fd, 0, 0x1f)
             self.caps = {ev: bits(self.fd, ev, UI_SET[ev][1]) for ev in UI_SET if ev in self.evs}
@@ -138,6 +204,43 @@ class Dev:
             os.close(ui)
             raise
         self.ui = ui
+
+    def kwin_ready(self):
+        """True once KWin has the clone on the iptsd device's screen (set over D-Bus if not) and as enabled"""
+        clone, orig = event_of(self.dst), self.node.rsplit('/', 1)[1]
+        if not clone:
+            return self.wait('the clone in sysfs')
+        out = kwin_prop(clone, 'outputName')
+        if out is None:
+            return self.wait('KWin (session) for ' + clone)
+        if out != self.output:
+            kwin_prop(clone, 'outputName', self.output)
+            out = kwin_prop(clone, 'outputName')
+            if out != self.output:
+                return self.wait('KWin to map %s onto %s (has "%s")' % (clone, self.output, out))
+            log('%s (%s): KWin output set to %s' % (self.dst, clone, out))
+        # the same calibration matrix as KWin uses for the iptsd device. KWin's getter lists the 4x4 matrix column by
+        # column, its setter (and kcminputrc) row by row; without a kcminputrc entry KWin round-trips libinput's
+        # default through both and ends up with it transposed (the translations lost: taps above the screen)
+        om, cm = matrix16(kwin_prop(orig, 'calibrationMatrix')), matrix16(kwin_prop(clone, 'calibrationMatrix'))
+        if om is None or cm is None:
+            return self.wait('the calibration matrix of %s / %s from KWin' % (orig, clone))
+        if cm != om:
+            kwin_prop(clone, 'calibrationMatrix', ','.join('%g' % om[c * 4 + r] for r in range(4) for c in range(4)))
+            if matrix16(kwin_prop(clone, 'calibrationMatrix')) != om:
+                return self.wait('KWin to take the calibration matrix of %s for %s' % (orig, clone))
+            log('%s (%s): calibration matrix copied from %s' % (self.dst, clone, orig))
+        en = kwin_prop(orig, 'enabled')
+        if en in ('true', 'false') and kwin_prop(clone, 'enabled') != en:
+            kwin_prop(clone, 'enabled', en == 'true')
+        self.waiting = None
+        return True
+
+    def wait(self, what):
+        if what != self.waiting:
+            log('%s: waiting for %s' % (self.dst, what))
+            self.waiting = what
+        return False
 
     def fingers(self):
         buf = bytearray(struct.pack('I', ABS_MT_TRACKING_ID) + struct.pack('64i', *([-1] * 64)))
@@ -304,6 +407,8 @@ def main():
                         d.create()
                         log('created %s for %s' % (d.dst, d.output))
                         continue  # give udev/KWin a round to add the clone before the grab
+                    if not d.kwin_ready():
+                        continue  # until then the iptsd device stays in use, uncorrected
                     if d.fingers():
                         continue  # never grab under a finger: KWin would keep that touch forever
                     d.grab()

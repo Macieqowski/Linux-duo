@@ -86,6 +86,14 @@ OutputName=DSI-2
 [Libinput][1118][3074][IPTSD Virtual Touchscreen 045E:0C02]
 CalibrationMatrix=0,-1,1,0,-1,0,1,0,0,0,1,0,0,0,0,1
 OutputName=DSI-1
+
+[Libinput][1118][3073][Duo Touchscreen 045E:0C01]
+CalibrationMatrix=0,-1,1,0,-1,0,1,0,0,0,1,0,0,0,0,1
+OutputName=DSI-2
+
+[Libinput][1118][3074][Duo Touchscreen 045E:0C02]
+CalibrationMatrix=0,-1,1,0,-1,0,1,0,0,0,1,0,0,0,0,1
+OutputName=DSI-1
 KCM
 chown -R user:user /home/user/.config
 # /mnt/linux = sda10 as pmOS sees it (iptsd, hexagonrpcd under /mnt/linux/opt/bin): here sda10 is already our root

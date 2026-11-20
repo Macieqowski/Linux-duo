@@ -74,13 +74,23 @@ grep -q '^WWANEnabled' /var/lib/NetworkManager/NetworkManager.state 2>/dev/null 
 
 # both screens: duo-hw switches the second panel (DSI-2) off unless /etc/duo/dual exists (or duo.dual=1)
 mkdir -p /etc/duo && touch /etc/duo/dual
-# touch under KWin: the digitizer (landscape) -> portrait panel, one digitizer per panel (measured by linuxduobench)
+# touch under KWin: the digitizer (landscape) -> portrait panel, one digitizer per panel (measured by linuxduobench);
+# the same for duo-touch-fix's corrected copies ("Duo Touchscreen"): KWin ignores udev's WL_OUTPUT for a device it
+# has no OutputName for here
 cat > /home/user/.config/kcminputrc << 'KCM'
 [Libinput][1118][3073][IPTSD Virtual Touchscreen 045E:0C01]
 CalibrationMatrix=0,-1,1,0,-1,0,1,0,0,0,1,0,0,0,0,1
 OutputName=DSI-2
 
 [Libinput][1118][3074][IPTSD Virtual Touchscreen 045E:0C02]
+CalibrationMatrix=0,-1,1,0,-1,0,1,0,0,0,1,0,0,0,0,1
+OutputName=DSI-1
+
+[Libinput][1118][3073][Duo Touchscreen 045E:0C01]
+CalibrationMatrix=0,-1,1,0,-1,0,1,0,0,0,1,0,0,0,0,1
+OutputName=DSI-2
+
+[Libinput][1118][3074][Duo Touchscreen 045E:0C02]
 CalibrationMatrix=0,-1,1,0,-1,0,1,0,0,0,1,0,0,0,0,1
 OutputName=DSI-1
 KCM
