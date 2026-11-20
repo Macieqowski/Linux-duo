@@ -1,0 +1,79 @@
+From 76e2fba569cb8888716142093a880ce237a0f184 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 23:57:32 +0000
+Subject: [PATCH] ASoC: qdsp6: q6voice: unmute the modem stream before starting
+ the call
+
+On the SM8150 ADSP (CVD 2.3) the modem voice stream stays muted until
+the application processor unmutes it: with only the MVM and CVP
+sessions the call path starts without errors, but no audio passes from
+the microphones to the remote side.
+
+Join the stream with a passive CVS session after the MVM session, and
+unmute TX and RX before VSS_IMVM_CMD_START_VOICE, as the downstream
+driver does. Older CVD versions pass audio without it, so a failure to
+join the stream is only a warning.
+
+Tested on the Surface Duo (SM8150) with a 2G call: audio passes in both
+directions.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EJcJH42jMtxxhTuvKvyeRV
+---
+ sound/soc/qcom/qdsp6/q6voice.c | 26 +++++++++++++++++++++++++-
+ 1 file changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6voice.c b/sound/soc/qcom/qdsp6/q6voice.c
+index 459547401..b601d4dc9 100644
+--- a/sound/soc/qcom/qdsp6/q6voice.c
++++ b/sound/soc/qcom/qdsp6/q6voice.c
+@@ -69,7 +69,7 @@ static struct q6voice_session *session_create_v3(enum q6voice_path_type type,
+ static int q6voice_path_start(struct q6voice_path *p)
+ {
+ 	struct device *dev = p->v->dev;
+-	struct q6voice_session *mvm, *cvp;
++	struct q6voice_session *mvm, *cvs, *cvp;
+ 	int ret;
+ 
+ 	dev_dbg(dev, "start path %d\n", p->type);
+@@ -82,6 +82,21 @@ static int q6voice_path_start(struct q6voice_path *p)
+ 		p->runtime->sessions[Q6VOICE_SERVICE_MVM] = mvm;
+ 	}
+ 
++	cvs = p->runtime->sessions[Q6VOICE_SERVICE_CVS];
++	if (!cvs) {
++		/*
++		 * Older CVD versions pass audio without a CVS session,
++		 * so carry on if the modem stream cannot be joined.
++		 */
++		cvs = q6cvs_session_create(p->type);
++		if (IS_ERR(cvs)) {
++			dev_warn(dev, "failed to join voice stream: %ld\n",
++				 PTR_ERR(cvs));
++			cvs = NULL;
++		}
++		p->runtime->sessions[Q6VOICE_SERVICE_CVS] = cvs;
++	}
++
+ 	cvp = p->runtime->sessions[Q6VOICE_SERVICE_CVP];
+ 	if (!cvp) {
+ 		if (p->v->cvd_v2_3)
+@@ -112,6 +127,15 @@ static int q6voice_path_start(struct q6voice_path *p)
+ 		goto attach_err;
+ 	}
+ 
++	if (cvs) {
++		ret = q6cvs_set_mute(cvs, true, false);
++		if (ret)
++			dev_warn(dev, "failed to unmute voice tx: %d\n", ret);
++		ret = q6cvs_set_mute(cvs, false, false);
++		if (ret)
++			dev_warn(dev, "failed to unmute voice rx: %d\n", ret);
++	}
++
+ 	ret = q6mvm_start(mvm, true);
+ 	if (ret) {
+ 		dev_err(dev, "failed to start voice: %d\n", ret);
+-- 
+2.43.0
+

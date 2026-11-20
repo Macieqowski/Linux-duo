@@ -1,0 +1,105 @@
+From 739881b5eff02a32f4fd6ed9ffeceaca835126c1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 23:57:32 +0000
+Subject: [PATCH] ASoC: qdsp6: q6cvs: add the passive stream session and the
+ mute command
+
+Add VSS_ISTREAM_CMD_CREATE_PASSIVE_CONTROL_SESSION, which joins the
+voice stream the modem created for a call, and VSS_IVOLUME_CMD_MUTE_V2,
+which mutes or unmutes that stream in the TX or RX direction. The
+downstream voice driver uses both for every modem call.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EJcJH42jMtxxhTuvKvyeRV
+---
+ sound/soc/qcom/qdsp6/q6cvs.c | 61 ++++++++++++++++++++++++++++++++++++
+ sound/soc/qcom/qdsp6/q6cvs.h |  3 ++
+ 2 files changed, 64 insertions(+)
+
+diff --git a/sound/soc/qcom/qdsp6/q6cvs.c b/sound/soc/qcom/qdsp6/q6cvs.c
+index 1b7531e5d..282397a33 100644
+--- a/sound/soc/qcom/qdsp6/q6cvs.c
++++ b/sound/soc/qcom/qdsp6/q6cvs.c
+@@ -8,6 +8,67 @@
+ #include "q6cvs.h"
+ #include "q6voice-common.h"
+ 
++#define VSS_ISTREAM_CMD_CREATE_PASSIVE_CONTROL_SESSION	0x00011140
++
++struct vss_istream_cmd_create_passive_control_session_cmd {
++	struct apr_hdr hdr;
++
++	/* A variable-sized stream name. */
++	char name[20];
++} __packed;
++
++#define VSS_IVOLUME_CMD_MUTE_V2				0x0001138B
++
++#define VSS_IVOLUME_DIRECTION_TX			0
++#define VSS_IVOLUME_DIRECTION_RX			1
++
++struct vss_ivolume_cmd_mute_v2_cmd {
++	struct apr_hdr hdr;
++
++	/* VSS_IVOLUME_DIRECTION_TX or VSS_IVOLUME_DIRECTION_RX */
++	u16 direction;
++	/* 1 = mute, 0 = unmute */
++	u16 mute_flag;
++	/* Mute/unmute ramp duration in milliseconds */
++	u16 ramp_duration_ms;
++} __packed;
++
++/*
++ * Join the stream the modem created for this voice path. The stream starts
++ * muted on newer CVD versions, so it has to be unmuted before the call audio
++ * passes in either direction.
++ */
++struct q6voice_session *q6cvs_session_create(enum q6voice_path_type path)
++{
++	struct vss_istream_cmd_create_passive_control_session_cmd cmd = {};
++	const char *session_name;
++
++	cmd.hdr.pkt_size = sizeof(cmd);
++	cmd.hdr.opcode = VSS_ISTREAM_CMD_CREATE_PASSIVE_CONTROL_SESSION;
++
++	session_name = q6voice_session_name(path);
++	if (session_name)
++		strscpy(cmd.name, session_name, sizeof(cmd.name));
++
++	return q6voice_session_create(Q6VOICE_SERVICE_CVS, path, &cmd.hdr);
++}
++EXPORT_SYMBOL_GPL(q6cvs_session_create);
++
++int q6cvs_set_mute(struct q6voice_session *cvs, bool capture, bool mute)
++{
++	struct vss_ivolume_cmd_mute_v2_cmd cmd = {};
++
++	cmd.hdr.pkt_size = sizeof(cmd);
++	cmd.hdr.opcode = VSS_IVOLUME_CMD_MUTE_V2;
++
++	cmd.direction = capture ? VSS_IVOLUME_DIRECTION_TX : VSS_IVOLUME_DIRECTION_RX;
++	cmd.mute_flag = mute;
++	cmd.ramp_duration_ms = 0;
++
++	return q6voice_common_send(cvs, &cmd.hdr);
++}
++EXPORT_SYMBOL_GPL(q6cvs_set_mute);
++
+ static int q6cvs_probe(struct apr_device *adev)
+ {
+ 	return q6voice_common_probe(adev, Q6VOICE_SERVICE_CVS);
+diff --git a/sound/soc/qcom/qdsp6/q6cvs.h b/sound/soc/qcom/qdsp6/q6cvs.h
+index 1b30eea98..cf7892cff 100644
+--- a/sound/soc/qcom/qdsp6/q6cvs.h
++++ b/sound/soc/qcom/qdsp6/q6cvs.h
+@@ -6,4 +6,7 @@
+ 
+ struct q6voice_session;
+ 
++struct q6voice_session *q6cvs_session_create(enum q6voice_path_type path);
++int q6cvs_set_mute(struct q6voice_session *cvs, bool capture, bool mute);
++
+ #endif /* _Q6_CVS_H */
+-- 
+2.43.0
+

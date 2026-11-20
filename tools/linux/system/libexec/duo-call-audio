@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Surface Duo in-call audio (2026-11-20, request "możesz naprawić dane komórkowe i połączenia?").
+
+The modem's call audio is mixed in the ADSP (q6voice, VoiceMMode1 front end): holding the VoiceMMode1 PCM open in
+both directions starts the voice path SLIMBUS_0_TX (microphones) -> vocproc -> modem -> vocproc -> SLIMBUS_0_RX ->
+WCD9340 EAR (earpiece). No audio data passes through this PCM, so the daemon only opens it, starts it and holds it
+while a call is up. ModemManager has no audio policy and callaudiod finds no voice profile in the UCM profile, so
+this daemon watches ModemManager's calls itself:
+
+  ringing-in / dialing  -> pre-route: add the earpiece path on the codec (the speaker path stays, for the ringtone)
+  active (ringing-out)  -> drop the speaker path, open the voice PCM at once
+  no call left          -> close the voice PCM, restore the speaker path
+
+Lessons from the test calls (docs: README "Połączenia"):
+- the codec must be switched to the earpiece a while before the voice path starts: switching it right before the
+  open ("overflow error on RX port 0") left the downlink deaf until the PCM was opened a second time;
+- the codec routes are changed only while PipeWire's sink and source are suspended;
+- the vocproc TX topology is set to NONE (0x10F70): the driver default SM_ECNS needs ACDB calibration and mutes
+  the uplink without it;
+- the WCD934x starts its SLIMbus channels only on trigger START, so the PCM is started, with the stop threshold at
+  the boundary (an empty playback stream would stop with EPIPE).
+Settings: /etc/default/duo-call-audio (shell syntax, read by the unit as environment).
+"""
+import ctypes, os, pwd, re, select, signal, subprocess, sys, time
+
+CARD = os.environ.get('DUO_CALL_CARD', 'SurfaceDuo')
+VOICE_PCM = os.environ.get('DUO_CALL_PCM', 'VoiceMMode1')
+SINK = os.environ.get('DUO_CALL_SINK', 'alsa_output.platform-sound.HiFi__Speaker__sink')
+SOURCE = os.environ.get('DUO_CALL_SOURCE', 'alsa_input.platform-sound.HiFi__Mic__source')
+EAR_RX0_VOLUME = int(os.environ.get('DUO_CALL_EAR_VOLUME', '84'))  # RX0 digital volume, 84 = 0 dB
+EAR_PA = int(os.environ.get('DUO_CALL_EAR_PA', '4'))  # EAR PA Volume, 4 = +6 dB (Android handset)
+MIC_BOOST_DB = int(os.environ.get('DUO_CALL_MIC_BOOST', '6'))  # added to DEC7 (the call microphone) during calls
+# open the voice path already while an outgoing call rings (network ringback tone) instead of at answer
+OPEN_ON_RINGING_OUT = os.environ.get('DUO_CALL_OPEN_RINGING_OUT', '1') == '1'
+TX_TOPOLOGY_NONE = 0x10F70
+UNANSWERED_GRACE = 6.0  # the first incoming Call object often vanishes 1-3 s after ringing; a new one follows
+
+# MMCallState
+DIALING, RINGING_OUT, RINGING_IN, ACTIVE, HELD, WAITING, TERMINATED = 1, 2, 3, 4, 5, 6, 7
+STATE_NAMES = {'unknown': 0, 'dialing': DIALING, 'ringing-out': RINGING_OUT, 'ringing-in': RINGING_IN,
+               'active': ACTIVE, 'held': HELD, 'waiting': WAITING, 'terminated': TERMINATED}
+
+
+def log(msg):
+    print(msg, flush=True)
+    try:
+        with open('/dev/kmsg', 'w') as k:
+            k.write('duo-call-audio: %s\n' % msg)
+    except OSError:
+        pass
+
+
+# ---- mixer -------------------------------------------------------------------------------------------------------
+def amixer(lines):
+    """Run cset/cget commands in one amixer process (amixer -s reads them from stdin)."""
+    r = subprocess.run(['amixer', '-c', CARD, '-s'], input='\n'.join(lines) + '\n', capture_output=True, text=True)
+    if r.returncode:
+        log('amixer failed: %s' % r.stderr.strip())
+    return r.stdout
+
+
+def cset(pairs):
+    amixer(["cset name='%s' %s" % (n, v) for n, v in pairs])
+
+
+def cget(names):
+    """Current values (as amixer prints them: numbers, enum items by index) of the named controls."""
+    out, vals = amixer(["cget name='%s'" % n for n in names]), []
+    for block in out.split('numid=')[1:]:
+        m = re.search(r'^\s*: values=(\S+)', block, re.M)
+        vals.append(m.group(1) if m else None)
+    return dict(zip(names, vals)) if len(vals) == len(names) else {}
+
+
+# ---- PipeWire ----------------------------------------------------------------------------------------------------
+def session_user():
+    for d in sorted(os.listdir('/run/user')) if os.path.isdir('/run/user') else []:
+        if os.path.exists('/run/user/%s/pulse/native' % d) or os.path.exists('/run/user/%s/pipewire-0' % d):
+            try:
+                return pwd.getpwuid(int(d))
+            except (KeyError, ValueError):
+                pass
+    return None
+
+
+def suspend(on):
+    """Suspend (on=True) or resume PipeWire's speaker sink and mic source, both at once."""
+    u = session_user()
+    if not u:
+        return
+    env = {'XDG_RUNTIME_DIR': '/run/user/%d' % u.pw_uid, 'PATH': '/usr/bin:/bin', 'HOME': u.pw_dir}
+    procs = [subprocess.Popen(['pactl', cmd, name, '1' if on else '0'], user=u.pw_uid, group=u.pw_gid, env=env,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+             for cmd, name in (('suspend-sink', SINK), ('suspend-source', SOURCE))]
+    for p in procs:
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+
+# ---- voice PCM ---------------------------------------------------------------------------------------------------
+class VoicePcm:
+    def __init__(self):
+        a = self.a = ctypes.CDLL('libasound.so.2')
+        VP, UL = ctypes.c_void_p, ctypes.c_ulong
+        a.snd_strerror.restype = ctypes.c_char_p
+        a.snd_pcm_open.argtypes = [ctypes.POINTER(VP), ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+        a.snd_pcm_set_params.argtypes = [VP, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_int,
+                                         ctypes.c_uint]
+        a.snd_pcm_sw_params_malloc.argtypes = [ctypes.POINTER(VP)]
+        a.snd_pcm_sw_params_current.argtypes = [VP, VP]
+        a.snd_pcm_sw_params_get_boundary.argtypes = [VP, ctypes.POINTER(UL)]
+        a.snd_pcm_sw_params_set_stop_threshold.argtypes = [VP, VP, UL]
+        a.snd_pcm_sw_params.argtypes = [VP, VP]
+        a.snd_pcm_sw_params_free.argtypes = [VP]
+        a.snd_pcm_start.argtypes = [VP]
+        a.snd_pcm_close.argtypes = [VP]
+        self.VP, self.UL, self.pcms = VP, UL, []
+
+    @staticmethod
+    def device():
+        try:
+            with open('/proc/asound/pcm') as f:
+                for line in f:
+                    m = re.match(r'(\d+)-(\d+): %s ' % re.escape(VOICE_PCM), line)
+                    if m:
+                        return 'hw:%s,%d' % (CARD, int(m.group(2)))
+        except OSError:
+            pass
+        return None
+
+    def open(self):
+        a, dev = self.a, self.device()
+        if not dev:
+            log('no %s PCM (q6voice modules not loaded?)' % VOICE_PCM)
+            return False
+        for stream in (0, 1):  # playback (RX) and capture (TX): the ADSP starts the path when both are open
+            p = self.VP()
+            r = a.snd_pcm_open(ctypes.byref(p), dev.encode(), stream, 0)
+            if r < 0:
+                log('open %s stream %d: %s' % (dev, stream, a.snd_strerror(r).decode()))
+                self.close()
+                return False
+            self.pcms.append(p)
+            r = a.snd_pcm_set_params(p, 2, 3, 1, 8000, 0, 500000)  # S16_LE, interleaved, mono, 8 kHz (prepares)
+            sw, bnd = self.VP(), self.UL()
+            a.snd_pcm_sw_params_malloc(ctypes.byref(sw))
+            a.snd_pcm_sw_params_current(p, sw)
+            a.snd_pcm_sw_params_get_boundary(sw, ctypes.byref(bnd))
+            a.snd_pcm_sw_params_set_stop_threshold(p, sw, bnd)
+            a.snd_pcm_sw_params(p, sw)
+            a.snd_pcm_sw_params_free(sw)
+            if r < 0:
+                log('set_params %s stream %d: %s' % (dev, stream, a.snd_strerror(r).decode()))
+                self.close()
+                return False
+        for p in self.pcms:
+            r = a.snd_pcm_start(p)
+            if r < 0:
+                log('start %s: %s' % (dev, a.snd_strerror(r).decode()))
+        log('voice path on (%s)' % dev)
+        return True
+
+    def close(self):
+        for p in self.pcms:
+            self.a.snd_pcm_close(p)
+        if self.pcms:
+            log('voice path off')
+        self.pcms = []
+
+    @property
+    def is_open(self):
+        return bool(self.pcms)
+
+
+# ---- routing -----------------------------------------------------------------------------------------------------
+SAVED_CONTROLS = ['RX INT0_1 MIX1 INP0', 'RX INT0 DEM MUX', 'RX INT7_1 MIX1 INP0', 'EAR PA Volume',
+                  'RX0 Digital Volume', 'DEC7 Volume']
+
+
+class CallAudio:
+    def __init__(self):
+        self.pcm = VoicePcm()
+        self.mode = 'idle'  # idle | pre | voice
+        self.saved = {}
+
+    def preroute(self):
+        """Earpiece path on, speaker path kept (a ringtone may be playing): done while the call still rings."""
+        suspend(True)
+        self.saved = cget(SAVED_CONTROLS)
+        dec7 = self.saved.get('DEC7 Volume')
+        pairs = [('SLIMBUS_0_RX Voice Mixer %s' % VOICE_PCM, 1), ('%s Capture Mixer SLIMBUS_0_TX' % VOICE_PCM, 1),
+                 ('%s TX Topology' % VOICE_PCM, TX_TOPOLOGY_NONE),
+                 ('RX INT0_1 MIX1 INP0', 'RX0'), ('RX INT0 DEM MUX', 'CLSH_DSM_OUT'),
+                 ('EAR PA Volume', EAR_PA), ('RX0 Digital Volume', EAR_RX0_VOLUME)]
+        if dec7 and dec7.lstrip('-').isdigit() and MIC_BOOST_DB:
+            pairs.append(('DEC7 Volume', min(int(dec7) + MIC_BOOST_DB, 124)))
+        cset(pairs)
+        suspend(False)
+        self.pre_time = time.monotonic()
+        self.mode = 'pre'
+        log('earpiece routed')
+
+    def voice_on(self):
+        if self.mode == 'idle':
+            self.preroute()
+        # the codec needs a moment between the earpiece switch and the voice start (else the downlink stays deaf)
+        wait = 2.5 - (time.monotonic() - self.pre_time)
+        suspend(True)
+        cset([('RX INT7_1 MIX1 INP0', 'ZERO')])
+        if wait > 0:
+            time.sleep(wait)
+        if self.pcm.open():
+            self.mode = 'voice'
+            return True
+        return False
+
+    def restore(self):
+        self.pcm.close()
+        suspend(True)
+        pairs = [('SLIMBUS_0_RX Voice Mixer %s' % VOICE_PCM, 0), ('%s Capture Mixer SLIMBUS_0_TX' % VOICE_PCM, 0)]
+        for name in SAVED_CONTROLS:
+            v = self.saved.get(name)
+            if v is not None:
+                pairs.append((name, v))
+        if not self.saved:  # the defaults of the HiFi profile
+            pairs += [('RX INT0_1 MIX1 INP0', 'ZERO'), ('RX INT7_1 MIX1 INP0', 'RX0')]
+        cset(pairs)
+        suspend(False)
+        self.mode = 'idle'
+        log('speaker routed back')
+
+
+# ---- ModemManager ------------------------------------------------------------------------------------------------
+def list_calls():
+    """{call path: (state, direction)} from mmcli."""
+    calls = {}
+    r = subprocess.run(['mmcli', '-m', 'any', '--voice-list-calls', '-K'], capture_output=True, text=True)
+    for path in re.findall(r'/org/freedesktop/ModemManager1/Call/\d+', r.stdout):
+        o = subprocess.run(['mmcli', '-o', path, '-K'], capture_output=True, text=True).stdout
+        st = re.search(r'call\.properties\.state\s*:\s*(\S+)', o)
+        di = re.search(r'call\.properties\.direction\s*:\s*(\S+)', o)
+        if st:
+            calls[path] = (STATE_NAMES.get(st.group(1), 0), di.group(1) if di else '')
+    return calls
+
+
+def wanted(calls):
+    states = {s for s, _ in calls.values()}
+    if states & {ACTIVE, HELD} or (OPEN_ON_RINGING_OUT and RINGING_OUT in states):
+        return 'voice'
+    if states & {DIALING, RINGING_OUT, RINGING_IN, WAITING}:
+        return 'pre'
+    return 'idle'
+
+
+STATE_CHANGED = re.compile(r'(/org/freedesktop/ModemManager1/Call/\d+): \S*Call\.StateChanged \((-?\d+), (-?\d+)')
+CALL_PROPS = re.compile(r'(/org/freedesktop/ModemManager1/Call/\d+): org\.freedesktop\.DBus\.Properties\.PropertiesChanged')
+
+
+def handle(line, calls):
+    """Apply one gdbus monitor line to calls; True if the call list has to be read again."""
+    m = STATE_CHANGED.match(line)
+    if m and m.group(1) in calls:  # fast path: the new state straight from the signal
+        calls[m.group(1)] = (int(m.group(3)), calls[m.group(1)][1])
+        return False
+    m = CALL_PROPS.match(line)
+    if m and m.group(1) in calls:  # the same state change again, as a property
+        return False
+    return 'Call' in line  # CallAdded / CallDeleted / a call we do not know yet
+
+
+def monitor():
+    return subprocess.Popen(['gdbus', 'monitor', '--system', '--dest', 'org.freedesktop.ModemManager1'],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+
+
+def main():
+    ca, stop = CallAudio(), []
+    signal.signal(signal.SIGTERM, lambda *x: stop.append(1))
+    signal.signal(signal.SIGINT, lambda *x: stop.append(1))
+    try:
+        mon = monitor()
+    except FileNotFoundError:
+        mon = None
+        log('gdbus not found: polling ModemManager every second')
+    calls, idle_since, refresh, retry_at = {}, None, True, 0.0
+    log('watching calls (voice path at ringing-out: %s)' % OPEN_ON_RINGING_OUT)
+    while not stop:
+        timeout = 1.0 if (mon is None or ca.mode != 'idle') else 30.0
+        if mon is None:
+            time.sleep(timeout)
+            refresh = True
+        elif select.select([mon.stdout], [], [], timeout)[0]:
+            # take the whole burst of signals of one change before acting
+            while True:
+                line = mon.stdout.readline()
+                if not line:  # gdbus died (D-Bus restart?): start it again after a pause
+                    mon.wait()
+                    time.sleep(2)
+                    mon, refresh = monitor(), True
+                    break
+                refresh = handle(line, calls) or refresh
+                if not select.select([mon.stdout], [], [], 0.05)[0]:
+                    break
+        else:
+            refresh = True  # periodic check, in case a signal was missed
+        if refresh:
+            calls, refresh = list_calls(), False
+        want, now = wanted(calls), time.monotonic()
+        if want == 'voice' and ca.mode != 'voice' and now >= retry_at:
+            if not ca.voice_on():
+                retry_at = now + 2.0  # the modem's voice session may not exist yet: try again
+        elif want == 'pre' and ca.mode == 'idle':
+            ca.preroute()
+        if want == 'idle' and ca.mode != 'idle':
+            if ca.mode == 'voice' or (idle_since is not None and now - idle_since >= UNANSWERED_GRACE):
+                ca.restore()
+                idle_since = None
+            elif idle_since is None:
+                idle_since = now
+        else:
+            idle_since = None
+    if ca.mode != 'idle':
+        ca.restore()
+    if mon is not None:
+        mon.terminate()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

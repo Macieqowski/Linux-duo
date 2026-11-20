@@ -1,0 +1,60 @@
+From 0a341fe05919901dbe55e53329101143ec427e20 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 23:57:32 +0000
+Subject: [PATCH] ASoC: qdsp6: q6cvp: map the second RX channel to FR
+
+The V3 vocproc setup describes the stereo RX device with the channel
+map FL, FL. With that map the SM8150 ADSP plays nothing on the RX port.
+Use FL, FR, as the downstream driver does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EJcJH42jMtxxhTuvKvyeRV
+---
+ sound/soc/qcom/qdsp6/q6cvp.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6cvp.c b/sound/soc/qcom/qdsp6/q6cvp.c
+index 907b7f7f2..7934c766b 100644
+--- a/sound/soc/qcom/qdsp6/q6cvp.c
++++ b/sound/soc/qcom/qdsp6/q6cvp.c
+@@ -6,6 +6,7 @@
+ #include <linux/of.h>
+ #include <linux/soc/qcom/apr.h>
+ #include "q6cvp.h"
++#include "q6dsp-common.h"
+ #include "q6voice-common.h"
+ 
+ #define VSS_IVOCPROC_DIRECTION_RX	0
+@@ -238,12 +239,12 @@ int q6cvp_send_channel_info(struct q6voice_session *cvp, bool is_tx)
+ 		cmd.param_data.channel_info.num_channels = 2;
+ 
+ 	cmd.param_data.channel_info.bits_per_sample = 16;
+-	cmd.param_data.channel_info.channel_mapping[0] = 1;
++	cmd.param_data.channel_info.channel_mapping[0] = PCM_CHANNEL_FL;
+ 
+ 	if (is_tx)
+ 		cmd.param_data.channel_info.channel_mapping[1] = 0;
+ 	else
+-		cmd.param_data.channel_info.channel_mapping[1] = 1;
++		cmd.param_data.channel_info.channel_mapping[1] = PCM_CHANNEL_FR;
+ 
+ 	cmd.param_data.channel_info.channel_mapping[2] = 0;
+ 	cmd.param_data.channel_info.channel_mapping[3] = 0;
+@@ -284,12 +285,12 @@ int q6cvp_send_media_format(struct q6voice_session *cvp, int port_id, bool is_tx
+ 
+ 	cmd.param_data.media_format_info.bits_per_sample = 16;
+ 	cmd.param_data.media_format_info.sample_rate = 48000;
+-	cmd.param_data.media_format_info.channel_mapping[0] = 1;
++	cmd.param_data.media_format_info.channel_mapping[0] = PCM_CHANNEL_FL;
+ 
+ 	if (is_tx)
+ 		cmd.param_data.media_format_info.channel_mapping[1] = 0;
+ 	else
+-		cmd.param_data.media_format_info.channel_mapping[1] = 1;
++		cmd.param_data.media_format_info.channel_mapping[1] = PCM_CHANNEL_FR;
+ 
+ 	cmd.param_data.media_format_info.channel_mapping[2] = 0;
+ 	cmd.param_data.media_format_info.channel_mapping[3] = 0;
+-- 
+2.43.0
+

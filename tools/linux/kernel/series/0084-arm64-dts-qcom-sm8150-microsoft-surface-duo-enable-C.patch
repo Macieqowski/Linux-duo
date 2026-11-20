@@ -1,0 +1,91 @@
+From 4c85d8039a89760ddc099035c1b5d91d158ca06f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 23:57:33 +0000
+Subject: [PATCH] arm64: dts: qcom: sm8150-microsoft-surface-duo: enable CVD
+ 2.3 and move the voice link last
+
+The SM8150 ADSP runs CVD 2.3. Describe it with qcom,cvd-v2.3, so that
+q6voice creates the vocproc with the V3 command and sends the device
+channel info and media format, as the downstream driver does.
+
+Move the VoiceMMode1 link into its own file, included after the
+microphone links, so that it comes last and the existing PCM numbers
+(MultiMedia2 = PCM 2, used by the UCM profile for capture) stay the
+same.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EJcJH42jMtxxhTuvKvyeRV
+---
+ .../sm8150-microsoft-surface-duo-audio.dtsi   |  9 ++-------
+ .../sm8150-microsoft-surface-duo-voice.dtsi   | 19 +++++++++++++++++++
+ .../dts/qcom/sm8150-microsoft-surface-duo.dts |  1 +
+ 3 files changed, 22 insertions(+), 7 deletions(-)
+ create mode 100644 arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-voice.dtsi
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi
+index bdd1a0620..53c62a492 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-audio.dtsi
+@@ -82,13 +82,6 @@ codec {
+ 				sound-dai = <&left_spkr>, <&swm 0>, <&wcd9340 0>;
+ 			};
+ 		};
+-
+-		voicemmode1-dai-link {
+-			link-name = "VoiceMMode1";
+-			cpu {
+-				sound-dai = <&q6voicedai VOICEMMODE1>;
+-			};
+-		};
+ 	};
+ };
+ 
+@@ -303,6 +296,8 @@ q6mvm: service@9 {
+ 				qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
+ 				q6voicedai: dais {
+ 					compatible = "qcom,q6voice-dais";
++					/* SM8150 ADSP: CVD 2.3 (vocproc create V3 + channel info / media format) */
++					qcom,cvd-v2.3;
+ 					#address-cells = <1>;
+ 					#size-cells = <0>;
+ 					#sound-dai-cells = <1>;
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-voice.dtsi b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-voice.dtsi
+new file mode 100644
+index 000000000..02b83590d
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo-voice.dtsi
+@@ -0,0 +1,19 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Surface Duo in-call audio: the VoiceMMode1 front end (q6voice). Android's HAL uses only this path
++ * (voicemmode1-call, mixer_paths_tavil.xml). Holding its PCM open in both directions starts the
++ * modem voice path in the ADSP: SLIMBUS_0_TX -> vocproc -> modem -> vocproc -> SLIMBUS_0_RX.
++ *
++ * Included after the microphone dtsi so that this link comes last: the PCM numbers follow the link
++ * order (0 MultiMedia1, 1 SLIM Playback, 2 MultiMedia2, 3 SLIM Capture, 4 VoiceMMode1) and the UCM
++ * profile captures from PCM 2.
++ */
++
++&{/sound} {
++	voicemmode1-dai-link {
++		link-name = "VoiceMMode1";
++		cpu {
++			sound-dai = <&q6voicedai VOICEMMODE1>;
++		};
++	};
++};
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo.dts b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo.dts
+index f1d7b6dd1..60c623ae2 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-microsoft-surface-duo.dts
+@@ -564,6 +564,7 @@ &wifi {
+ #include "sm8150-microsoft-surface-duo-charger.dtsi"
+ #include "sm8150-microsoft-surface-duo-gpu.dtsi"
+ #include "sm8150-microsoft-surface-duo-mic.dtsi"
++#include "sm8150-microsoft-surface-duo-voice.dtsi"
+ #include "sm8150-microsoft-surface-duo-camera.dtsi"
+ #include "sm8150-microsoft-surface-duo-camss.dtsi"
+ #include "sm8150-microsoft-surface-duo-imx351.dtsi"
+-- 
+2.43.0
+

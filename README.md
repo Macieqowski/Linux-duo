@@ -22,9 +22,9 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | GPU (Adreno 640) | działa | Mesa freedreno/turnip z backports |
 | Wi-Fi, Bluetooth | działa | ath10k / hci_qca |
 | Dane komórkowe (LTE) | działa | modem + IPA v4.1 + ModemManager |
-| **Połączenia, SMS** | **częściowo** | na tym repo: SMS i połączenia (przez 2G) działają z [obejściem modemu](#modem-obejście-awarii-quick-offline), ale bez dźwięku rozmowy, dzwonka i wibracji. Do zrobienia |
+| **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`. Bez głośnomówiącego, dzwonka i wibracji |
 | Głośnik, mikrofony | działa | WCD9340 + WSA8815, strojenie z ACDB telefonu. Na 7.3.5 głośnik milczał: [naprawione trasą w DT](#głośnik-cisza-na-735) |
-| Słuchawka do rozmów | częściowo | wyjście EAR kodeka; gra po poprawkach `0076`–`0079`, [cichsza niż głośnik](#słuchawka-do-rozmów-wyjście-ear); głośność w rozmowie do sprawdzenia |
+| Słuchawka do rozmów | działa | wyjście EAR kodeka (`0076`–`0079`); w rozmowie gra przez DSP ([dźwięk rozmowy](#dźwięk-rozmowy-q6voice)), [ciszej niż głośnik](#słuchawka-do-rozmów-wyjście-ear) |
 | Czujniki, zawias, obrót | działa | SLPI + hexagonrpcd + libssc (budowane w obrazie) |
 | Aparat | częściowo | wymaga modułu imx351 zbudowanego z danych Twojego telefonu |
 | Ładowanie, bateria | działa | qcom_smbx (SMB5) + 2x bq27742 |
@@ -152,6 +152,42 @@ Przy testach wyjść: nie zmieniaj tras `RX INTx_1 MIX1 INP0`, gdy strumień jes
 ponownego otwarcia. Najpierw `pactl suspend-sink <sink> 1`, potem mikser, potem `pactl suspend-sink <sink> 0`.
 Wyjścia LINEOUT i HPH (Duo nie ma gniazda słuchawek) na razie kończą się błędem overflow. Po takiej próbie głośnik
 może milczeć mimo dobrego miksera: pomaga jeszcze jedno uśpienie i wybudzenie sinka.
+
+## Dźwięk rozmowy (q6voice)
+
+Dźwięk połączenia nie przechodzi przez PipeWire: modem i DSP audio (ADSP) mieszają go same. Linux otwiera tylko PCM
+`VoiceMMode1` (w obu kierunkach) i trzyma go otwartego, a ADSP łączy wtedy mikrofony (`SLIMBUS_0_TX`) przez obróbkę
+mowy (vocproc) z modemem i modem ze słuchawką (`SLIMBUS_0_RX` -> EAR). Sterownik to seria „hack!” q6voice Stephana
+Gerholda z dodatkami dla CVD 2.3 (`0056`–`0072`). Żeby na SM8150 dźwięk przechodził w obie strony, potrzebne były
+jeszcze poprawki `0080`–`0084` (2026-11-20, sprawdzone w 13 rozmowach testowych):
+
+- `0081`, `0082`: tak jak sterownik Androida, q6voice dołącza do strumienia głosowego modemu (pasywna sesja CVS)
+  i przed startem rozmowy wyłącza jego wyciszenie (`VSS_IVOLUME_CMD_MUTE_V2`) w obu kierunkach. Bez tego rozmówca
+  nie słyszał nic z mikrofonu Duo, mimo że wszystkie polecenia DSP kończyły się sukcesem.
+- `0083`: mapa kanałów słuchawki FL, FR zamiast FL, FL (z FL, FL na słuchawce była cisza).
+- `0084`: `qcom,cvd-v2.3` w DT i łącze `VoiceMMode1` na końcu karty, więc numery PCM się nie przesuwają
+  (0 MultiMedia1, 2 MultiMedia2 = mikrofon w UCM, 4 VoiceMMode1).
+
+Topologia obróbki mikrofonu to `NONE` (0x10F70, kontrolka `VoiceMMode1 TX Topology`): domyślna `SM_ECNS` bez
+kalibracji z ACDB wycisza mikrofon, a dwa kanały mikrofonu (fluence) DSP odrzuca. Echo i szumy nie są więc na razie
+tłumione.
+
+Rozmowy włącza usługa `duo-call-audio` (`tools/linux/system`), bo ModemManager nie steruje dźwiękiem, a `callaudiod`
+nie znajduje w UCM profilu do rozmów. Usługa ładuje moduły q6voice (karta dźwiękowa czeka na nie, gdy DT ma łącze
+głosowe), śledzi połączenia w ModemManagerze i:
+
+- przy dzwonieniu (przychodzącym albo wybieraniu numeru) dokłada w kodeku tor słuchawki, tor głośnika zostaje (dzwonek);
+- przy odebraniu, a przy wychodzącym już przy sygnale dzwonienia, wyłącza tor głośnika i od razu otwiera PCM głosowy;
+- po rozłączeniu zamyka PCM i przywraca głośnik. W rozmowie podbija mikrofon (`DEC7 Volume`) o 6 dB.
+
+Kodek trzeba przełączyć na słuchawkę chwilę przed startem toru głosowego. Gdy przełączenie było tuż przed startem
+(w `dmesg`: `overflow error on RX port 0`), słuchawka milczała aż do ponownego otwarcia PCM, przy dowolnym odstępie
+od odebrania. Dlatego usługa przełącza kodek już przy dzwonieniu; dźwięk jest ok. 1,5 s po odebraniu. Ustawienia
+(głośność słuchawki, podbicie mikrofonu, start przy sygnale dzwonienia) są w `/etc/default/duo-call-audio`, opis
+w nagłówku skryptu. Nie przeładowuj modułów q6voice w działającym systemie: karta się przebindowuje i porty AFE
+nie działają aż do restartu telefonu.
+
+Do zrobienia: przełączanie na głośnik (tryb głośnomówiący), głośność rozmowy z suwaka, dzwonek z wibracją, VoLTE.
 
 ## Wibracje: reset telefonu przy „sile wibracji”
 

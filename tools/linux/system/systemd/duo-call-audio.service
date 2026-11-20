@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Surface Duo in-call audio: loads the q6voice modules (the sound card waits for the q6voice DAIs when the DT has the
+# voice link) and switches the call audio on and off with ModemManager's calls (/usr/libexec/duo/duo-call-audio).
+[Unit]
+Description=Surface Duo in-call audio (q6voice)
+After=duo-hw.service
+Wants=ModemManager.service
+
+[Service]
+Type=simple
+ExecStartPre=-/bin/sh -c 'modprobe -q q6voice-dai || { . /usr/libexec/duo/duo-lib.sh; for m in q6voice-common q6mvm q6cvp q6cvs q6voice q6voice-dai; do duo_insmod $m; done; }'
+EnvironmentFile=-/etc/default/duo-call-audio
+ExecStart=/usr/libexec/duo/duo-call-audio
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

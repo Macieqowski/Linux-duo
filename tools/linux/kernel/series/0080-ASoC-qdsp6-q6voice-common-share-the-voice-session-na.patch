@@ -1,0 +1,111 @@
+From f3505c9db37faaa86f5a532d84c10fc76d229087 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 23:57:32 +0000
+Subject: [PATCH] ASoC: qdsp6: q6voice-common: share the voice session names
+
+Move the passive session name table from q6mvm to q6voice-common, so
+that the CVS service can join the same modem stream by name.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EJcJH42jMtxxhTuvKvyeRV
+---
+ sound/soc/qcom/qdsp6/q6mvm.c          | 26 +-------------------------
+ sound/soc/qcom/qdsp6/q6voice-common.c | 25 +++++++++++++++++++++++++
+ sound/soc/qcom/qdsp6/q6voice-common.h |  1 +
+ 3 files changed, 27 insertions(+), 25 deletions(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6mvm.c b/sound/soc/qcom/qdsp6/q6mvm.c
+index d56f7b862..957a0e05d 100644
+--- a/sound/soc/qcom/qdsp6/q6mvm.c
++++ b/sound/soc/qcom/qdsp6/q6mvm.c
+@@ -46,30 +46,6 @@ struct vss_imvm_cmd_attach_vocproc_cmd {
+ #define VSS_IMVM_CMD_START_VOICE			0x00011190
+ #define VSS_IMVM_CMD_STOP_VOICE				0x00011192
+ 
+-static inline const char *q6mvm_session_name(enum q6voice_path_type path)
+-{
+-	switch (path) {
+-	case Q6VOICE_PATH_VOICE:
+-		return "default modem voice";
+-	case Q6VOICE_PATH_VOIP:
+-		return "10004000";
+-	case Q6VOICE_PATH_VOLTE:
+-		return "10C02000";
+-	case Q6VOICE_PATH_VOICE2:
+-		return "10DC1000";
+-	case Q6VOICE_PATH_QCHAT:
+-		return "10803000";
+-	case Q6VOICE_PATH_VOWLAN:
+-		return "10002000";
+-	case Q6VOICE_PATH_VOICEMMODE1:
+-		return "11C05000";
+-	case Q6VOICE_PATH_VOICEMMODE2:
+-		return "11DC5000";
+-	default:
+-		return NULL;
+-	}
+-}
+-
+ static int q6mvm_set_dual_control(struct q6voice_session *mvm)
+ {
+ 	struct vss_imvm_cmd_set_policy_dual_control_cmd cmd;
+@@ -92,7 +68,7 @@ struct q6voice_session *q6mvm_session_create(enum q6voice_path_type path)
+ 	cmd.hdr.pkt_size = sizeof(cmd);
+ 	cmd.hdr.opcode = VSS_IMVM_CMD_CREATE_PASSIVE_CONTROL_SESSION;
+ 
+-	session_name = q6mvm_session_name(path);
++	session_name = q6voice_session_name(path);
+ 	if (session_name)
+ 		strscpy(cmd.name, session_name, sizeof(cmd.name));
+ 
+diff --git a/sound/soc/qcom/qdsp6/q6voice-common.c b/sound/soc/qcom/qdsp6/q6voice-common.c
+index cec25a40a..8335a453c 100644
+--- a/sound/soc/qcom/qdsp6/q6voice-common.c
++++ b/sound/soc/qcom/qdsp6/q6voice-common.c
+@@ -68,6 +68,31 @@ void q6voice_common_remove(struct apr_device *adev)
+ }
+ EXPORT_SYMBOL_GPL(q6voice_common_remove);
+ 
++const char *q6voice_session_name(enum q6voice_path_type path)
++{
++	switch (path) {
++	case Q6VOICE_PATH_VOICE:
++		return "default modem voice";
++	case Q6VOICE_PATH_VOIP:
++		return "10004000";
++	case Q6VOICE_PATH_VOLTE:
++		return "10C02000";
++	case Q6VOICE_PATH_VOICE2:
++		return "10DC1000";
++	case Q6VOICE_PATH_QCHAT:
++		return "10803000";
++	case Q6VOICE_PATH_VOWLAN:
++		return "10002000";
++	case Q6VOICE_PATH_VOICEMMODE1:
++		return "11C05000";
++	case Q6VOICE_PATH_VOICEMMODE2:
++		return "11DC5000";
++	default:
++		return NULL;
++	}
++}
++EXPORT_SYMBOL_GPL(q6voice_session_name);
++
+ static void q6voice_session_free(struct kref *ref)
+ {
+ 	struct q6voice_session *s = container_of(ref, struct q6voice_session,
+diff --git a/sound/soc/qcom/qdsp6/q6voice-common.h b/sound/soc/qcom/qdsp6/q6voice-common.h
+index 5b47ce3ce..cda8b1109 100644
+--- a/sound/soc/qcom/qdsp6/q6voice-common.h
++++ b/sound/soc/qcom/qdsp6/q6voice-common.h
+@@ -36,6 +36,7 @@ void q6voice_common_remove(struct apr_device *adev);
+ int q6voice_common_callback(struct apr_device *adev, const struct apr_resp_pkt *data);
+ int q6voice_common_send(struct q6voice_session *s, struct apr_hdr *hdr);
+ 
++const char *q6voice_session_name(enum q6voice_path_type path);
+ struct q6voice_session *q6voice_session_create(enum q6voice_service_type type,
+ 					       enum q6voice_path_type path,
+ 					       struct apr_hdr *hdr);
+-- 
+2.43.0
+
