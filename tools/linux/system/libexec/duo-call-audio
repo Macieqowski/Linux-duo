@@ -39,7 +39,7 @@ def log(msg):
         pass
 
 
-# ---- mixer -------------------------------------------------------------------------------------------------------
+# --- mixer ---
 def amixer(lines):
     """Run cset/cget commands in one amixer process (amixer -s reads them from stdin)."""
     r = subprocess.run(['amixer', '-c', CARD, '-s'], input='\n'.join(lines) + '\n', capture_output=True, text=True)
@@ -61,7 +61,7 @@ def cget(names):
     return dict(zip(names, vals)) if len(vals) == len(names) else {}
 
 
-# ---- PipeWire ----------------------------------------------------------------------------------------------------
+# --- PipeWire ---
 def session_user():
     for d in sorted(os.listdir('/run/user')) if os.path.isdir('/run/user') else []:
         if os.path.exists('/run/user/%s/pulse/native' % d) or os.path.exists('/run/user/%s/pipewire-0' % d):
@@ -88,7 +88,7 @@ def suspend(on):
             p.kill()
 
 
-# ---- voice PCM ---------------------------------------------------------------------------------------------------
+# --- voice PCM ---
 class VoicePcm:
     def __init__(self):
         a = self.a = ctypes.CDLL('libasound.so.2')
@@ -163,7 +163,7 @@ class VoicePcm:
         return bool(self.pcms)
 
 
-# ---- routing -----------------------------------------------------------------------------------------------------
+# --- routing ---
 SAVED_CONTROLS = ['RX INT0_1 MIX1 INP0', 'RX INT0 DEM MUX', 'RX INT7_1 MIX1 INP0', 'EAR PA Volume',
                   'RX0 Digital Volume', 'DEC7 Volume']
 
@@ -221,7 +221,7 @@ class CallAudio:
         log('speaker routed back')
 
 
-# ---- ModemManager ------------------------------------------------------------------------------------------------
+# --- ModemManager ---
 def list_calls():
     """{call path: (state, direction)} from mmcli."""
     calls = {}
