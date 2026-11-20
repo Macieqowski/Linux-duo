@@ -9,7 +9,7 @@
 // are averaged into [uncorrected, target] pairs (output 0..1).
 // Near the edges the position is the daemon's own estimate from the heatmap, which needs calibrating per edge: for each
 // edge tap the app asks the daemon for that touch's measurement ({"cmd":"last"}: kh, where the finger's profile falls
-// to half) and keeps it with the target. While measuring, the daemon holds every touch 10 % away from the screen edges
+// to half) and keeps it with the target. While measuring, the daemon holds that screen's touches 10 % away from its edges
 // ({"cmd":"hold"}): a tap at a crosshair 1.5 % from DSI-2's bottom must not open Plasma Mobile's panel. The edge taps
 // are therefore checked only along their edge.
 // "Zapisz" sends the pairs and the edge taps to duo-touch-fix, which applies them at once (per edge a lookup from kh
@@ -102,15 +102,23 @@ function pairs(taps, axis, size) {
 
 const app = new Gtk.Application({application_id: 'org.duo.TouchCalib'});
 let open = 0, haveFix = false;
-const measuring = new Set();  // windows measuring now: the daemon holds touches off the edges while any is
-function holding(win, on) {
-    const had = measuring.size > 0;
-    if (on)
-        measuring.add(win);
-    else
-        measuring.delete(win);
-    if (haveFix && had !== measuring.size > 0)
-        fix({cmd: 'hold', margin: measuring.size ? HOLD : 0});
+// the daemon holds the touches on a screen off its edges while that screen's window measures (only that screen:
+// 2026-11-20 the hold of DSI-1's window, already waiting for taps, also held DSI-2's test page off the edges)
+const held = new Map();  // window -> the screen held for it
+function holding(win, on, screen) {
+    const was = held.get(win);
+    if (on && was === screen)
+        return;
+    if (was !== undefined) {
+        held.delete(win);
+        if (haveFix && ![...held.values()].includes(was))
+            fix({cmd: 'hold', margin: 0, screen: was});
+    }
+    if (on) {
+        held.set(win, screen);
+        if (haveFix)
+            fix({cmd: 'hold', margin: HOLD, screen});
+    }
 }
 
 function screenWindow(monitor) {
@@ -154,7 +162,7 @@ function screenWindow(monitor) {
             printerr(`${name}: no status from duo-touch-fix, measuring as uncorrected`);
         const l = haveFix ? fix({cmd: 'last', screen: name}) : null;
         st.seq = l && l.last ? l.last.seq : 0;
-        holding(win, true);
+        holding(win, true, name);
         prompt();
         area.queue_draw();
     }
@@ -165,7 +173,7 @@ function screenWindow(monitor) {
             '(przytrzymaj palec, żeby przerwać)');
     }
     function finish() {
-        holding(win, false);
+        holding(win, false, name);
         const w = area.get_width(), h = area.get_height();
         if (!full()) {  // the window changed size while measuring: its fractions are not the screen's
             st.phase = 'nofull';
@@ -190,8 +198,8 @@ function screenWindow(monitor) {
         st.result = r;
         st.phase = 'result';
         say(`${name}: w środku bez korekcji średni błąd ${r.mean_err_px} px, z obecną ${r.mean_err_now_px} px;\n` +
-            (eerr.length ? `przy krawędziach obecnie ${r.edge_err_now_px} px, największy ${r.edge_max_err_now_px} px.`
-                         : 'przy krawędziach bez pomiaru.') +
+            (eerr.length ? `przy krawędziach z dotychczasową korekcją ${r.edge_err_now_px} px, ` +
+                           `największy ${r.edge_max_err_now_px} px.` : 'przy krawędziach bez pomiaru.') +
             (haveFix ? '\nZapisać korekcję dla tego ekranu?' : '\nUsługa duo-touch-fix nie działa: tylko pomiar.'));
         bSave.sensitive = bReset.sensitive = haveFix;
         box.visible = true;
@@ -208,7 +216,18 @@ function screenWindow(monitor) {
     bSave.connect('clicked', () => {
         const s = {}; s[name] = {x: st.result.x, y: st.result.y, edges: st.result.edges};
         const r = fix({cmd: 'save', screens: s});
-        test(r && r.ok ? 'Zapisane.' : 'Nie udało się zapisać.');
+        let msg = r && r.ok ? 'Zapisane.' : 'Nie udało się zapisać.';
+        // where the new correction puts the edge taps
+        const w = area.get_width(), h = area.get_height();
+        const p = r && r.ok && st.result.edges.length ? fix({cmd: 'predict', screen: name, edges: st.result.edges}) : null;
+        if (p && Array.isArray(p.predict) && p.predict.length === st.result.edges.length) {
+            const e = p.predict.map((q, i) => q.key.startsWith('col') ? Math.abs(q.sy - st.result.edges[i].ty) * h
+                                                                       : Math.abs(q.sx - st.result.edges[i].tx) * w);
+            const mean = +(e.reduce((a, b) => a + b, 0) / e.length).toFixed(1);
+            msg += ` Przy krawędziach teraz średnio ${mean} px, największy ${Math.max(...e).toFixed(1)} px.`;
+            print(JSON.stringify({screen: name, predict: p.predict, edge_err_new_px: mean}));
+        }
+        test(msg);
     });
     bReset.connect('clicked', () => {
         const r = fix({cmd: 'reset', screens: [name]});
@@ -300,7 +319,7 @@ function screenWindow(monitor) {
         if (st.phase !== 'measure')
             return;
         st.phase = 'paused';
-        holding(win, false);
+        holding(win, false, name);
         say(`${name}: pomiar przerwany.`);
         bSave.visible = bReset.visible = false;
         box.visible = true;
@@ -308,7 +327,7 @@ function screenWindow(monitor) {
     });
     area.add_controller(lp);
     win.connect('close-request', () => {
-        holding(win, false);
+        holding(win, false, name);
         if (--open <= 0)
             app.quit();
         return false;
@@ -330,7 +349,7 @@ function screenWindow(monitor) {
     // 2026-11-20: 529x648 of 529x706), or put it on the other screen. Full screen on the asked screen is requested
     // again every 1.5 s; after 9 s without it, no measurement.
     function whenFull() {
-        holding(win, false);
+        holding(win, false, name);
         st.phase = 'wait';
         box.visible = false;
         say(`${name}: chwila...`);

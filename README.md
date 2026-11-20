@@ -517,10 +517,27 @@ linii, łączy w jeden punkt, bo czujnik ich nie rozróżnia. Poniżej najpłyts
 nachyleniem pierwszego odcinka, a powyżej najgłębszego rośnie z nachyleniem 1. Na żywo wynik jest lekko wygładzany
 (połowa nowej klatki).
 
-Podczas pomiaru demon trzyma każdy dotyk co najmniej 10 % od krawędzi ekranu (`{"cmd":"hold","margin":0.1}`, do
-zamknięcia połączenia). Dzięki temu stuknięcie 1,5 % od dołu prawego ekranu nie otwiera panelu. Dlatego krzyżyki przy
-krawędziach aplikacja sprawdza tylko wzdłuż krawędzi. Wynik pokazuje też, gdzie obecne obliczenie kładzie stuknięcia
-przy krawędziach.
+Podczas pomiaru demon trzyma dotyk na mierzonym ekranie co najmniej 10 % od jego krawędzi
+(`{"cmd":"hold","margin":0.1,"screen":"DSI-2"}`, do zamknięcia połączenia). Dzięki temu stuknięcie 1,5 % od dołu
+prawego ekranu nie otwiera panelu. Dlatego krzyżyki przy krawędziach aplikacja sprawdza tylko wzdłuż krawędzi. Wynik
+pokazuje też, gdzie dotychczasowe obliczenie kładzie stuknięcia przy krawędziach, a po „Zapisz” (przez
+`{"cmd":"predict"}`), gdzie kładzie je nowa kalibracja.
+
+Pierwsza kalibracja tą wersją (21:28 i 21:29) dała dwie poprawki:
+- **Przytrzymanie było wspólne dla obu ekranów.** Okno lewego ekranu od razu czekało na stuknięcia, więc strona
+  testowa prawego ekranu po zapisie też trzymała dotyk 10 % od krawędzi. Krawędzie wyglądały na źle skalibrowane.
+  Teraz każde okno trzyma tylko swój ekran.
+- **1,5 % i 3 % to dla czujnika to samo co brzeg.** Na obu ekranach i przy każdej krawędzi `kh` przy tych krzyżykach
+  wynosiło 1,50–1,56, prawie dokładnie minimum (1,5: palec tylko na linii przy brzegu, następna bez sygnału). Mapa
+  kładła więc dotyk samej krawędzi ok. 2 % w głąb (12–15 px), a gesty od krawędzi Plasma Mobile potrzebują dotyku
+  przy samym brzegu. Teraz tablica zaczyna się od `kh` = 1,5 → brzeg, jak w `StretchToBorder` z Androida. Punkty
+  tablicy bliżej niż 0,02 od tego minimum są pomijane. Krzyżyki 1,5 % i 3 % lądują teraz 0–21 px bliżej brzegu
+  niż cel, a 6 % i 10 % dalej trafiają w cel (±0,1 px na medianach stuknięć).
+- **Wygładzanie zależy od nachylenia tablicy.** Przy dolnej i prawej krawędzi krok od 1,5 do 6 % to tylko
+  0,08–0,14 `kh` na ok. 1,4 linii. Tam, gdzie tablica jest bardziej stroma niż 4 linie na jednostkę `kh`, nowa
+  klatka waży mniej (do 0,15 zamiast 0,5), żeby drganie `kh` nie przesuwało kropki o kilkanaście pikseli.
+
+Demon przelicza tablice z zapisanych stuknięć przy każdym starcie, więc po aktualizacji nie trzeba kalibrować od nowa.
 
 ## Jasność: lewy ekran jaśniejszy
 
