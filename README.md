@@ -196,10 +196,11 @@ w nagłówku skryptu. Nie przeładowuj modułów q6voice w działającym systemi
 nie działają aż do restartu telefonu. Komunikaty kodeka `overflow error on RX port 0` / `TX port 8` przy
 przełączaniu tras poza startem toru głosowego są nieszkodliwe.
 
-Telefon testowy z obrazem sprzed serii `0080`–`0084` działa tymczasowo z modułami q6voice z tymi poprawkami w wersji
-diagnostycznej: `/lib/modules/$(uname -r)/updates/q6voice` (po `depmod`) i `/etc/modprobe.d/duo-q6voice.conf`
-z `options q6voice cvs_unmute=1 tx_topo_override=0x10f70` oraz `options q6cvp fix_rx_map=1`. Jądro z tego repo
-tego nie potrzebuje.
+Telefon testowy ma jądro zbudowane przed serią `0080`–`0084`, a moduły q6voice z tymi poprawkami ładuje z
+`/lib/modules/$(uname -r)/updates/q6voice` (po `depmod`). Do 2026-11-20 były to moduły w wersji diagnostycznej z
+`/etc/modprobe.d/duo-q6voice.conf` (`options q6voice cvs_unmute=1 tx_topo_override=0x10f70`,
+`options q6cvp fix_rx_map=1`). Od 16:17 tego dnia są tam moduły zbudowane z serii, bez tego pliku, a jądro ma już
+`0085`. Jądro z tego repo nie potrzebuje żadnego z tych dodatków.
 
 Przyciski rozmowy w Plasma Dialer: dialer wysyła je do `callaudiod`, który nie ma profilu rozmowy dla tej karty.
 `duo-call-audio` śledzi więc sygnały `speakerModeChanged` i `muteChanged` usługi `org.kde.telephony.DialerUtils`
@@ -250,8 +251,11 @@ Kanał `DEC8` był o 20 dB cichszy przez błąd w sterowniku kodeka (także w cz
 w `wcd934x.c` pole rejestru `ADC MUX10` (`ADC_MUX1_CFG1` zamiast `ADC_MUX0_CFG1`, jak w sterowniku dostawcy). Przez to
 bit 7 rejestru `CDC_TX8_TX_PATH_CFG0` (wybór mikrofonu analogowego albo cyfrowego) nigdy nie jest ustawiany i `DEC8`
 przetwarza mikrofon cyfrowy w trybie analogowym. Pomiar 2026-11-20: ten sam mikrofon na `DEC7` i `DEC8` naraz
-(`arecord`, S16, korelacja 0,99) dał na `DEC8` 22,5 dB mniej. Patch `0085` poprawia pole. Wejdzie z następnym obrazem
-jądra; do tego czasu `DEC8` nagrywa ciszej.
+(`arecord`, S16, korelacja 0,99) dał na `DEC8` 22,5 dB mniej. Patch `0085` poprawia pole. Sprawdzone na telefonie z
+jądrem z `0085` (2026-11-20, 16:20): ten sam mikrofon na `DEC7` i `DEC8` dał na `DEC8` 2,3 dB więcej (korelacja 0,96)
+zamiast 22,5 dB mniej, a komunikaty „overflow error on TX port 8” zniknęły. Ton z głośnika nagrany przez PipeWire był
+czysty na obu kanałach (49 i 47 dB nad sąsiednimi pasmami). `DMIC2` (góra lewej połówki) słyszy głośnik ok. 19 dB
+głośniej niż `DMIC1`, bo leży bliżej niego.
 
 W trybie cyfrowym dekymator jest „gorący”: przy `DEC Volume` 84 (0 dB) cichy pokój dawał -53 dBFS, a ton 1500 Hz z
 głośnika telefonu się przesterowywał. Przy 62 ton był czysty (-21 dBFS przy tle -73 dBFS), przy 72 też (-11 dBFS).
@@ -261,8 +265,9 @@ Uszkodzony kanał po ponownym otwarciu strumienia: 2026-11-20 o 14:52 PipeWire o
 „underflow error on TX port 7” tuż przed startem) i od tej chwili kanał `DEC7` dawał sam szum z przesterowaniem: ton z
 głośnika był tylko 11 dB nad tłem, a na `DEC8` 51 dB. To ten sam port, którego używa mikrofon w rozmowie. Przełączenie
 profilu karty na `off` i z powrotem na `HiFi` (`pactl set-card-profile alsa_card.platform-sound off`, potem `HiFi`)
-naprawiło kanał (ton czysty, 52 dB nad tłem). Przyczyna jest jeszcze nieznana. Gdyby w rozmowie zamiast głosu był
-szum, pomoże to samo przełączenie profilu.
+naprawiło kanał (ton czysty, 52 dB nad tłem). Ten sam stan był po uruchomieniu telefonu 2026-11-20 o 16:17: strumień
+otwarty przy starcie sesji nie nagrywał tonu na żadnym kanale, po przełączeniu profilu oba były czyste. Przyczyna
+jest jeszcze nieznana. Gdyby w rozmowie zamiast głosu był szum, pomoże to samo przełączenie profilu.
 
 `pactl suspend-source` nie zwalnia mikrofonu, bo plasmashell (plasma-pa) cały czas trzyma na nim i na monitorze
 głośnika strumienie mierników głośności („PlasmaPA-VolumeMeter”). Przez to nagrywanie i odtwarzanie przez PipeWire
@@ -336,7 +341,10 @@ Sprawdzone na telefonie 2026-11-20:
 - reset po zapaleniu ekranów przyciskiem, bez przypadkowych kliknięć;
 - odtworzone zacięcie bez udziału człowieka, z wyłączonym resetem: 3 palce testowego urządzenia uinput w dół,
   ekrany zgasły po bezczynności przy odblokowanej sesji, palce podniesione przy wygaszonych ekranach. Stuknięcie
-  próbne nie dotarło do okna testowego, a po `duo-wake --touch-reset` dotarło.
+  próbne nie dotarło do okna testowego, a po `duo-wake --touch-reset` dotarło;
+- ten sam przebieg z włączonym resetem (16:05): ekrany zgasły po bezczynności, palce podniesione przy wygaszonych
+  ekranach, po włączeniu ekranów usługa zrobiła reset sama i następne stuknięcie dotarło do okna, bez dotyku trzema
+  palcami.
 Zmiana stanu blokady, gdy palce są jeszcze na ekranie, sama czyści gest (KWin anuluje wtedy dotyki). Dlatego
 przycisk zasilania, który od razu blokuje telefon, zacina dotyk tylko wtedy, gdy palce zejdą z ekranu między
 wygaszeniem a blokadą. Prawdopodobnie tak było 2026-11-20 o 12:01 (dłoń na ekranie przy naciskaniu zasilania).
