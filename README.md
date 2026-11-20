@@ -248,7 +248,14 @@ wygaszonych ekranów. Dlatego od sygnału dzwonienia do odebrania, odrzucenia al
 Gdy obiekt połączenia w ModemManagerze znika, dzwonek gra jeszcze 2,5 s, bo zwykle od razu pojawia się nowy. Obraz
 systemu wyłącza dźwięk zdarzenia `ringing` w `~/.config/plasma-dialer.notifyrc` (okienko zostaje), żeby dzwonek nie
 grał podwójnie. Ustawienia w `/etc/default/duo-call-audio`: `DUO_CALL_RINGTONE` (plik dzwonka, pusty = bez dzwonka),
-`DUO_CALL_VIBRATE=0` (bez wibracji), `DUO_CALL_WAKE=0` (bez budzenia).
+`DUO_CALL_VIBRATE=0` (bez wibracji), `DUO_CALL_WAKE=0` (bez budzenia), `DUO_CALL_RAISE=0` (bez wyciągania dialera).
+
+Dialer w tle: gdy Plasma Dialer już działa w tle, przy połączeniu przygotowuje stronę rozmowy, ale jego okno zostaje
+z tyłu, także po odebraniu z powiadomienia. Na Waylandzie program w tle może wyciągnąć swoje okno tylko z ważnym
+tokenem aktywacji, a KWin blokuje go jako kradzież fokusu (plasmashell: „Got invalid activation app_id:
+org.kde.plasma.dialer.desktop”). Dlatego `duo-call-audio` przy dzwonieniu i po starcie rozmowy wyciąga okno dialera
+jednorazowym skryptem KWin przez D-Bus (`org.kde.kwin.Scripting`, teraz i jeszcze raz po 1,5 s, bo dialer
+uruchomiony dla rozmowy pokazuje okno później). Test w rozmowie: w toku.
 
 Budzenie: KWin włącza wyłączone ekrany (DPMS, po bezczynności albo przyciskiem zasilania) przy naciśnięciu dowolnego
 klawisza, a `org.freedesktop.ScreenSaver.SimulateUserActivity` ich nie włącza (sprawdzone). `duo-wake` naciska więc

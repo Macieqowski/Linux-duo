@@ -16,6 +16,8 @@ DEC7 at its minimum. Every call starts on the earpiece, unmuted (both buttons ar
 Plasma Dialer 6.3's call page cannot read the buttons' state back (CallPage.qml: "Cannot assign [undefined] to bool"),
 so every press sends setSpeakerMode(true) / setMute(true), never false; a true while that state is already on is
 therefore taken as the second press: this daemon sends the false to kde-telephony-daemon itself.
+When a call rings or comes up it also raises Plasma Dialer's window (a one-shot KWin script over D-Bus): a dialer
+already running in the background is otherwise kept behind by focus stealing prevention.
 Call volume: during a call the speaker sink's volume (slider, volume keys) is the call volume; it starts at the last
 call's volume (/var/lib/duo/call-volume) and the media volume comes back after the call.
 The codec must be routed to the earpiece a while before the voice start (else the downlink stays deaf until a
@@ -42,6 +44,18 @@ OPEN_ON_RINGING_OUT = os.environ.get('DUO_CALL_OPEN_RINGING_OUT', '1') == '1'
 RINGTONE = os.environ.get('DUO_CALL_RINGTONE', '/usr/share/sounds/ocean/stereo/phone-incoming-call.oga')
 VIBRATE = os.environ.get('DUO_CALL_VIBRATE', '1') == '1'
 WAKE = os.environ.get('DUO_CALL_WAKE', '1') == '1'
+# bring Plasma Dialer's window to the front when a call rings and when it comes up (KWin script over D-Bus)
+RAISE = os.environ.get('DUO_CALL_RAISE', '1') == '1'
+RAISE_JS = '''// duo-call-audio: Plasma Dialer's window to the front (focus stealing prevention keeps it behind)
+const ws = workspace.windowList ? workspace.windowList() : workspace.clientList();
+for (const w of ws) {
+    const id = String(w.desktopFileName || '') + ' ' + String(w.resourceClass || '');
+    if (/plasma[.-]dialer/.test(id) && w.normalWindow) {
+        if (w.minimized) w.minimized = false;
+        workspace.activeWindow = w;
+    }
+}
+'''
 RING_GRACE = 2.5  # keep ringing this long when the ringing Call object vanishes (a new one often follows)
 # speakerphone: RX7 digital volume at the default call volume (84 = 0 dB; HiFi music uses 104), its mic and mic level
 SPK_RX7_VOLUME = int(os.environ.get('DUO_CALL_SPK_VOLUME', '94'))
@@ -153,6 +167,29 @@ def level(base, pct):
     if pct <= 0:
         return 0
     return max(0, min(124, base + round(60 * math.log10(pct / CALL_VOLUME_DEFAULT))))
+
+
+def raise_dialer():
+    """Activate Plasma Dialer's window through a one-shot KWin script, now and again after 1.5 s (a dialer that is
+    started for the call maps its window late). Runs in the background as the session's user."""
+    u = session_user()
+    if not RAISE or not u or not os.path.exists('/run/user/%d/bus' % u.pw_uid):
+        return
+    path = '/run/user/%d/duo-raise-dialer.js' % u.pw_uid
+    try:
+        with open(path, 'w') as f:
+            f.write(RAISE_JS)
+        os.chown(path, u.pw_uid, u.pw_gid)
+    except OSError:
+        return
+    sh = ('for d in 0 1.5; do sleep $d; '
+          'busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting unloadScript s duo-raise-dialer >/dev/null; '
+          'id=$(busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting loadScript ss "$0" duo-raise-dialer '
+          '| cut -d" " -f2) && busctl --user call org.kde.KWin /Scripting/Script$id org.kde.kwin.Script run; '
+          'done; busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting unloadScript s duo-raise-dialer')
+    subprocess.Popen(['sh', '-c', sh, path], user=u.pw_uid, group=u.pw_gid, env=user_env(u), start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log('raising the dialer window')
 
 
 def dialer_set(method, value):
@@ -447,6 +484,7 @@ class Ringer:
         if WAKE and os.path.exists('/usr/libexec/duo/duo-wake'):
             subprocess.Popen(['/usr/libexec/duo/duo-wake', 'incoming call'], stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
+        raise_dialer()
         u = session_user()
         player = shutil.which('paplay') or shutil.which('pw-play')
         if u and RINGTONE and player and os.path.exists(RINGTONE):
@@ -582,6 +620,8 @@ def main():
         if want == 'voice' and ca.mode != 'voice' and now >= retry_at:
             if not ca.voice_on():
                 retry_at = now + 2.0  # the modem's voice session may not exist yet: try again
+            else:
+                raise_dialer()  # answered (perhaps from the notification) or dialled: the call page to the front
         elif want == 'pre' and ca.mode == 'idle':
             ca.preroute()
         if ringing(calls):  # after the pre-route: it suspends the sink for a moment
