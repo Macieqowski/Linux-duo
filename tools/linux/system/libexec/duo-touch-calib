@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Surface Duo touch calibration ("Kalibracja dotyku", 2026-11-20). One fullscreen window per screen shows 13
 // crosshairs one after the other (edges at 6 % / 94 %, quarter points, centre); the person taps the centre of each.
-// While it measures, duo-touch-fix passes the touches through uncorrected ("raw" on its socket), so the taps show the
-// digitizer's own error. Per screen and axis the taps at the same target line are averaged into [measured, target]
-// pairs (output 0..1); "Zapisz" sends them to duo-touch-fix, which applies them at once and keeps them in
-// /etc/duo/touch-calibration.json. "Bez korekcji" removes that screen's correction. After saving, the window becomes a
+// The taps come through the correction duo-touch-fix applies now (without it a tap aimed at the bottom crosshairs of
+// DSI-2 lands in Plasma Mobile's bottom gesture strip and opens the panel); the app takes the current map from the
+// daemon and turns each tap back into the uncorrected position (the map is piecewise linear and increasing, so its
+// inverse swaps the knots), which is the digitizer's own error. Per screen and axis the taps at the same target line
+// are averaged into [uncorrected, target] pairs (output 0..1); "Zapisz" sends them to duo-touch-fix, which applies
+// them at once and keeps them in /etc/duo/touch-calibration.json. "Bez korekcji" removes that screen's correction. After saving, the window becomes a
 // test page: every touch draws a dot where the system sees it.
 // Run in the desktop session: duo-touch-calib [DSI-1 DSI-2] (default: every screen). Also prints one JSON line per
 // screen on stdout.
@@ -47,6 +49,35 @@ function fix(obj) {
     }
 }
 
+// the map duo-touch-fix builds from [measured, target] pairs (its class Map): (0,0), the increasing knots, (1,1)
+function knots(prs) {
+    const k = (prs || []).map(([m, t]) => [+m, +t]).filter(([m, t]) => m > 0 && m < 1 && t > 0 && t < 1)
+        .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const pts = [[0, 0]];
+    for (const [m, t] of k) {
+        const [pm, pt] = pts[pts.length - 1];
+        if (m > pm + 1e-4 && t > pt + 1e-4)
+            pts.push([m, t]);
+    }
+    pts.push([1, 1]);
+    while (pts.length > 2 && pts[pts.length - 2][1] >= 1 - 1e-4)
+        pts.splice(pts.length - 2, 1);
+    return pts;
+}
+const IDENTITY = [[0, 0], [1, 1]];
+// corrected position (0..1) -> the uncorrected one: the inverse of the piecewise-linear map
+function unmap(pts, v) {
+    if (v <= 0 || v >= 1)
+        return v;
+    for (let i = 1; i < pts.length; i++) {
+        if (v <= pts[i][1]) {
+            const [m0, t0] = pts[i - 1], [m1, t1] = pts[i];
+            return m0 + (v - t0) * (m1 - m0) / (t1 - t0);
+        }
+    }
+    return v;
+}
+
 function pairs(taps, axis, size) {
     const groups = new Map();
     for (const p of taps) {
@@ -60,7 +91,7 @@ function pairs(taps, axis, size) {
 }
 
 const app = new Gtk.Application({application_id: 'org.duo.TouchCalib'});
-let open = 0, measuring = 0, haveFix = false;
+let open = 0, haveFix = false;
 
 function screenWindow(monitor) {
     const want = monitor.get_connector() || 'screen';
@@ -79,7 +110,7 @@ function screenWindow(monitor) {
     overlay.add_overlay(label);
     overlay.add_overlay(box);
     win.set_child(overlay);
-    // phases: wait (window not yet full screen), nofull (gave up waiting), measure, result, test
+    // phases: wait (window not yet full screen), nofull (gave up waiting), measure, paused (long press), result, test
     const st = {phase: 'wait', i: 0, taps: [], dots: [], lastUp: 0, miss: false, result: null, mon: null};
     const say = t => label.set_markup('<span size="large" foreground="white">' + t + '</span>');
     // full screen on the asked screen. Both screens have the same size, so the size alone does not tell which one:
@@ -90,38 +121,42 @@ function screenWindow(monitor) {
     function start() {
         st.phase = 'measure'; st.i = 0; st.taps = []; st.dots = []; st.miss = false;
         box.visible = false;
-        measuring++;
-        if (measuring === 1 && haveFix)
-            fix({cmd: 'raw'});
+        // the correction now applied to this screen (none if duo-touch-fix does not handle its touchscreen)
+        const s = haveFix ? fix({cmd: 'status'}) : null;
+        const cur = s && s.screens && s.screens[name];
+        const handled = s && Array.isArray(s.devices) && s.devices.some(d => d.output === name);
+        st.kx = cur && handled ? knots(cur.x) : IDENTITY;
+        st.ky = cur && handled ? knots(cur.y) : IDENTITY;
+        if (haveFix && !s)
+            printerr(`${name}: no status from duo-touch-fix, measuring as uncorrected`);
         prompt();
         area.queue_draw();
     }
     function prompt() {
         say((st.miss ? 'Za daleko od krzyżyka, jeszcze raz.\n' : '') +
-            `${name}: dotknij dokładnie środka krzyżyka (${st.i + 1}/${FR.length})`);
-    }
-    function endMeasure() {
-        measuring--;
-        if (measuring === 0 && haveFix)
-            fix({cmd: 'normal'});
+            `${name}: dotknij dokładnie środka krzyżyka (${st.i + 1}/${FR.length})\n` +
+            '(przytrzymaj palec, żeby przerwać)');
     }
     function finish() {
         const w = area.get_width(), h = area.get_height();
         if (!full()) {  // the window changed size while measuring: its fractions are not the screen's
             st.phase = 'nofull';
-            endMeasure();
             notFull();
             return;
         }
         const r = {screen: name, width: w, height: h, taps: st.taps, x: pairs(st.taps, 'x', w), y: pairs(st.taps, 'y', h)};
+        const mean = a => +(a.reduce((x, y) => x + y, 0) / a.length).toFixed(1);
         const err = st.taps.map(p => Math.hypot(p.x - p.tx, p.y - p.ty));
-        r.mean_err_px = +(err.reduce((a, b) => a + b, 0) / err.length).toFixed(1);
+        const cerr = st.taps.map(p => Math.hypot(p.cx - p.tx, p.cy - p.ty));
+        r.mean_err_px = mean(err);
         r.max_err_px = +Math.max(...err).toFixed(1);
+        r.mean_err_now_px = mean(cerr);
+        r.max_err_now_px = +Math.max(...cerr).toFixed(1);
         print(JSON.stringify(r));
         st.result = r;
         st.phase = 'result';
-        endMeasure();
-        say(`${name}: średni błąd ${r.mean_err_px} px, największy ${r.max_err_px} px.` +
+        say(`${name}: bez korekcji średni błąd ${r.mean_err_px} px, największy ${r.max_err_px} px;\n` +
+            `z obecną korekcją ${r.mean_err_now_px} px, największy ${r.max_err_now_px} px.` +
             (haveFix ? '\nZapisać korekcję dla tego ekranu?' : '\nUsługa duo-touch-fix nie działa: tylko pomiar.'));
         bSave.sensitive = bReset.sensitive = haveFix;
         box.visible = true;
@@ -131,8 +166,6 @@ function screenWindow(monitor) {
         st.phase = 'test'; st.dots = [];
         box.visible = true;
         bSave.visible = bReset.visible = false;
-        if (measuring > 0)
-            msg += '\n(Drugi ekran jeszcze mierzy: do końca pomiaru bez korekcji.)';
         say(msg + '\nDotykaj ekranu: kropka pokazuje, gdzie system widzi palec.');
         area.queue_draw();
     }
@@ -158,10 +191,11 @@ function screenWindow(monitor) {
             cr.moveTo(x - 30, y); cr.lineTo(x + 30, y); cr.moveTo(x, y - 30); cr.lineTo(x, y + 30); cr.stroke();
             cr.arc(x, y, 12, 0, 2 * Math.PI); cr.stroke();
         } else if (st.phase === 'result') {
-            for (const p of st.taps) {
+            for (const p of st.taps) {  // yellow: target, blue: without correction, green: with the current one
                 cr.setSourceRGB(1, 0.85, 0.2); cr.arc(p.tx, p.ty, 4, 0, 2 * Math.PI); cr.fill();
                 cr.setSourceRGB(0.3, 0.9, 1); cr.moveTo(p.tx, p.ty); cr.lineTo(p.x, p.y); cr.stroke();
                 cr.arc(p.x, p.y, 4, 0, 2 * Math.PI); cr.fill();
+                cr.setSourceRGB(0.3, 1, 0.4); cr.arc(p.cx, p.cy, 3, 0, 2 * Math.PI); cr.fill();
             }
         } else if (st.phase === 'test') {
             cr.setSourceRGB(0.4, 0.4, 0.5);
@@ -193,7 +227,9 @@ function screenWindow(monitor) {
         const tx = FR[st.i][0] * w, ty = FR[st.i][1] * h;
         if (Math.hypot(d[0] - tx, d[1] - ty) > MAX_MISS) { st.miss = true; prompt(); return; }
         st.miss = false;
-        st.taps.push({tx: +tx.toFixed(1), ty: +ty.toFixed(1), x: +d[0].toFixed(1), y: +d[1].toFixed(1)});
+        // seen through the current correction (cx, cy); x, y = where it would be without it
+        st.taps.push({tx: +tx.toFixed(1), ty: +ty.toFixed(1), cx: +d[0].toFixed(1), cy: +d[1].toFixed(1),
+                      x: +(unmap(st.kx, d[0] / w) * w).toFixed(1), y: +(unmap(st.ky, d[1] / h) * h).toFixed(1)});
         st.i++;
         if (st.i >= FR.length)
             finish();
@@ -202,9 +238,19 @@ function screenWindow(monitor) {
         area.queue_draw();
     });
     area.add_controller(g);
+    // a long press stops the measurement (the buttons are hidden while it runs)
+    const lp = new Gtk.GestureLongPress({delay_factor: 3.0});
+    lp.connect('pressed', () => {
+        if (st.phase !== 'measure')
+            return;
+        st.phase = 'paused';
+        say(`${name}: pomiar przerwany.`);
+        bSave.visible = bReset.visible = false;
+        box.visible = true;
+        area.queue_draw();
+    });
+    area.add_controller(lp);
     win.connect('close-request', () => {
-        if (st.phase === 'measure')
-            endMeasure();
         if (--open <= 0)
             app.quit();
         return false;

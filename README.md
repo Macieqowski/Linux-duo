@@ -414,8 +414,12 @@ urządzenie iptsd, bez korekcji. Obraz od razu ma w `kcminputrc` wpisy dla obu k
 
 Korekcję mierzy aplikacja „Kalibracja dotyku” (`duo-touch-calib`, GTK4 przez gjs, na liście aplikacji). Na obu
 ekranach pokazuje po kolei 13 krzyżyków (6 % od krawędzi, ćwiartki, środek), a pomyłki dalej niż 80 px od celu i
-podwójne stuknięcia odrzuca. Na czas pomiaru prosi `duo-touch-fix` o dotyk bez korekcji. Potem pokazuje błąd
-i przyciski: „Zapisz” (od razu działa i zostaje w `/etc/duo/touch-calibration.json`), „Bez korekcji”, „Jeszcze raz”.
+podwójne stuknięcia odrzuca. Mierzy przez obecną korekcję: bierze jej mapę od `duo-touch-fix` i każde stuknięcie
+przelicza z powrotem na pozycję bez korekcji (mapa jest odcinkowo-liniowa i rosnąca, więc jej odwrotność to zamienione
+węzły). Wcześniej na czas pomiaru korekcja była wyłączana, ale wtedy stuknięcie w dolne krzyżyki prawego ekranu
+(94 % wysokości) trafiało przy 99 %, w pasek gestów Plasma Mobile, i otwierało dolny panel. Pierwsza kalibracja
+prawego ekranu szła więc przez tymczasową mapę pionu z lewego ekranu. Przytrzymanie palca przerywa pomiar. Potem
+aplikacja pokazuje błąd bez korekcji i z obecną korekcją oraz przyciski: „Zapisz” (od razu działa i zostaje w `/etc/duo/touch-calibration.json`), „Bez korekcji”, „Jeszcze raz”.
 Po zapisie ekran służy do sprawdzenia: każde dotknięcie rysuje krzyżyk tam, gdzie widzi je system.
 
 Wynik na telefonie 2026-11-20 (19:44–19:53):
