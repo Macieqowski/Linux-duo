@@ -18,6 +18,17 @@ OutputName there wins), so the iptsd device is grabbed only once KWin has mapped
 daemon sets the clone's outputName, calibration matrix and enabled (as KWin has them for the iptsd device) through
 KWin's D-Bus, as the session's user; KWin keeps them in kcminputrc. Without a session (or KWin) the clone waits and the iptsd device stays in use.
 
+Edges (2026-11-20): the digitizer's outermost heatmap line on every side is a copy of the next one (no own signal),
+and iptsd's Gaussian fit then cannot get a finger closer than ~0.2 lines to the border: everything from ~6 % of the
+screen outwards reads ~1 %, which no per-axis map can undo. So the daemon also reads each digitizer's heatmap from its
+hidraw node (read-only, next to iptsd) and, for a contact within ~4 lines of a border, puts its own estimate in the
+place of iptsd's along that axis: the finger's inner flank (where the profile from the border inwards falls to half
+its peak; untouched by the copied border line and by the firmware gating the second line on and off) minus the
+finger's half-width. A finger lying only on the line next to the border is taken as touching the border, and the
+positions in between are stretched linearly onto it - what Android's Microsoft touch library does (StretchToBorder in
+libsurfacetouch.so). Further in it fades into iptsd's own position. {"cmd":"edge","on":false} switches it off until
+the daemon restarts; {"cmd":"watch"} streams the estimates.
+
 The map comes from /etc/duo/touch-calibration.json, written through the socket by the calibration app
 (duo-touch-calib): per screen and output axis, pairs [measured, target] in the output's 0..1 coordinates, measured
 without correction ("raw" mode, which the app holds while it measures). The screen edges always map onto themselves.
@@ -34,8 +45,19 @@ RULES = '/run/udev/rules.d/91-duo-touch-fix.rules'
 SRC = 'IPTSD Virtual Touchscreen'
 DST = 'Duo Touchscreen'
 EV_SYN, EV_KEY, EV_ABS, EV_MSC = 0, 1, 3, 4
-ABS_X, ABS_Y, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID = 0x00, 0x01, 0x35, 0x36, 0x39
+SYN_REPORT, SYN_DROPPED = 0, 3
+ABS_X, ABS_Y, ABS_MT_SLOT, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID = 0x00, 0x01, 0x2f, 0x35, 0x36, 0x39
 EVENT = struct.Struct('llHHi')  # struct input_event, 64-bit
+# the Surface Duo digitizer's heatmap in its hidraw reports: 21 rows (iptsd Y, row 0 = Y 0) x 27 columns (iptsd X,
+# inverted: column 0 = X max), u8, at byte 26 (measured 2026-11-20 with touch-capture)
+HM_OFF, HM_ROWS, HM_COLS = 26, 21, 27
+EDGE = {
+    'near': 4.5,  # only contacts that iptsd puts within this many lines of a border
+    'blend': (3.0, 4.0),  # own estimate below, iptsd's above, linear in between (lines from the border)
+    'r': {'col': 1.06, 'row': 1.12},  # finger half-width at half signal along each axis (lines; median, 2026-11-20)
+    'a': 0.5,  # the stretch ends at half-width + a lines from the border (Android: r + a)
+    'min': 40,  # peak of the 3-line profile below this: no estimate
+}
 
 
 def _ioc(d, nr, size):
@@ -130,6 +152,89 @@ def event_of(name):
     return None
 
 
+def hidraw_of(vid, pid):
+    """/dev/hidrawN of the HID device vid:pid, or None"""
+    for p in sorted(glob.glob('/sys/class/hidraw/hidraw*/device/uevent')):
+        try:
+            ids = dict(l.split('=', 1) for l in open(p).read().splitlines() if '=' in l).get('HID_ID', '')
+            _, v, d = (int(x, 16) for x in ids.split(':'))
+        except (OSError, ValueError):
+            continue
+        if (v, d) == (vid, pid):
+            return '/dev/' + p.split('/')[4]
+    return None
+
+
+def edge_est(prof, u, r):
+    """distance of a contact from a border, in heatmap lines, from the profile prof[k] of the lines k = 1.. from the
+    border inwards (prof[0] unused: the border line only copies line 1); u = iptsd's distance. None: keep iptsd's"""
+    top = min(len(prof) - 1, int(u + 3.5))  # the peak is this contact's: iptsd's distance is never too large
+    a = max(prof[1:top + 1])
+    if a < EDGE['min']:
+        return None
+    kp = prof.index(a, 1)
+    h = a / 2.0
+    kh = None
+    for i in range(kp, len(prof) - 1):
+        if prof[i] >= h > prof[i + 1]:
+            kh = i + (prof[i] - h) / float(prof[i] - prof[i + 1])  # the inner flank at half the peak
+            break
+    if kh is None:
+        return None
+    d = kh - r
+    if abs(d - u) > 3.0:
+        return None
+    d0, t = 1.5 - r, r + EDGE['a']  # d0: the finger only on line 1 = at the border
+    out = t * (d - d0) / (t - d0) if d < t else d
+    b0, b1 = EDGE['blend']
+    w = min(1.0, max(0.0, (d - b0) / (b1 - b0)))
+    return max(0.0, (1.0 - w) * out + w * u)
+
+
+class Heat:
+    """one digitizer's latest heatmap, read from its hidraw node alongside iptsd (hidraw gives every reader a copy)"""
+
+    def __init__(self, path):
+        self.path = path
+        self.fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        self.hm, self.t, self.sig, self.rid = None, 0.0, None, None
+
+    def drain(self):
+        last = None
+        while True:
+            try:
+                b = os.read(self.fd, 4096)
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+            if not b:
+                break
+            if len(b) >= HM_OFF + HM_ROWS * HM_COLS:
+                last = b
+        if last is not None:
+            self.hm, self.t, self.sig = last[HM_OFF:HM_OFF + HM_ROWS * HM_COLS], time.monotonic(), None
+            if self.rid is None:
+                self.rid = last[0]
+
+    def signal(self):
+        """the heatmap as touch signal >= 0 (neutral = the most common value, the finger's side of it), or None"""
+        if self.hm is None or time.monotonic() - self.t > 0.05:
+            return None
+        if self.sig is None:
+            hm = self.hm
+            neutral = max(set(hm), key=hm.count)
+            if hm.count(neutral) < len(hm) // 4:
+                self.sig = False  # not a heatmap report
+            else:
+                pol = 1 if max(hm) - neutral >= neutral - min(hm) else -1
+                self.sig = [max(0, (b - neutral) * pol) for b in hm]
+        return self.sig or None
+
+    def close(self):
+        os.close(self.fd)
+
+
 class Map:
     """piecewise-linear map on 0..1 through (0,0), the measured knots, (1,1)"""
 
@@ -185,6 +290,20 @@ class Dev:
             os.close(self.fd)
             raise
         self.mx = self.my = Map()
+        self.heat = None
+        try:
+            v, p = (int(x, 16) for x in self.suffix.split(':'))
+            h = hidraw_of(v, p)
+            if h:
+                self.heat = Heat(h)
+        except (ValueError, OSError) as e:
+            log('%s: no heatmap (%s)' % (self.dst, e))
+        self.edge = self.heat is not None
+        self.watch = None  # callback for {"cmd":"watch"}
+        self.slot, self.fslot, self.slots, self.sent, self.frame = 0, None, {}, {}, []
+        self.st = [self.abs.get(ABS_X, (0,))[0], self.abs.get(ABS_Y, (0,))[0]]  # the single-touch copy
+        self.maxx = self.abs.get(ABS_MT_POSITION_X, (0, 0, 0))[2]
+        self.maxy = self.abs.get(ABS_MT_POSITION_Y, (0, 0, 0))[2]
 
     def create(self):
         ui = os.open('/dev/uinput', os.O_WRONLY | os.O_NONBLOCK)
@@ -253,6 +372,35 @@ class Dev:
     def grab(self):
         fcntl.ioctl(self.fd, EVIOCGRAB, 1)
         self.grabbed = True
+        self.resync()
+
+    def mtslots(self, code):
+        buf = bytearray(struct.pack('I', code) + bytes(4 * 64))
+        fcntl.ioctl(self.fd, EVIOCGMTSLOTS_64, buf)
+        return struct.unpack_from('64i', buf, 4)
+
+    def resync(self):
+        """slot state from the iptsd device (after the grab or a SYN_DROPPED), and the clone told all of it"""
+        try:
+            tid, xs, ys = (self.mtslots(c) for c in (ABS_MT_TRACKING_ID, ABS_MT_POSITION_X, ABS_MT_POSITION_Y))
+            buf = bytearray(24)
+            fcntl.ioctl(self.fd, EVIOCGABS(ABS_MT_SLOT), buf)
+            self.slot = struct.unpack('6i', buf)[0]
+        except OSError:
+            return
+        gone = [s for s, v in self.slots.items() if v[0] != -1 and tid[s] == -1]
+        self.slots = {s: [tid[s], xs[s], ys[s]] for s in range(64) if tid[s] != -1}
+        self.frame, self.fslot, self.sent = [], None, {}
+        out = []
+        for s in gone:  # ended while events were dropped
+            out += [(EV_ABS, ABS_MT_SLOT, s), (EV_ABS, ABS_MT_TRACKING_ID, -1)]
+        for s, (t, x, y) in self.slots.items():
+            fx, fy = self.correct(x, y)
+            out += [(EV_ABS, ABS_MT_SLOT, s), (EV_ABS, ABS_MT_TRACKING_ID, t), (EV_ABS, ABS_MT_POSITION_X, fx),
+                    (EV_ABS, ABS_MT_POSITION_Y, fy)]
+            self.sent[s] = [fx, fy]
+        out += [(EV_ABS, ABS_MT_SLOT, self.slot), (EV_SYN, SYN_REPORT, 0)]
+        self.emit(out)
 
     def set_maps(self, screen, raw):
         """screen: {"x": pairs, "y": pairs} in output coordinates -> maps on this device's raw X / raw Y"""
@@ -287,18 +435,108 @@ class Dev:
             return v
         return int(round(lo + m((v - lo) / (hi - lo)) * (hi - lo)))
 
+    def edge_fix(self, x, y):
+        """iptsd's raw (x, y) with the position along each axis replaced near a border (see the docstring)"""
+        sig = self.heat.signal() if self.edge and self.heat else None
+        if sig is None or self.maxx <= 0 or self.maxy <= 0:
+            return x, y
+        nc, nr = HM_COLS - 1, HM_ROWS - 1
+        cf = nc * (1.0 - x / float(self.maxx))  # X grows towards column 0
+        rf = nr * y / float(self.maxy)
+        nx, ny, info = x, y, []
+        # along the columns (the screen's top and bottom): profile over the rows next to the contact's
+        side, u = (0, cf) if cf <= nc - cf else (1, nc - cf)
+        if u < EDGE['near']:
+            rows = range(max(1, int(round(rf)) - 1), min(nr - 1, int(round(rf)) + 1) + 1)
+            prof = [0] + [sum(sig[j * HM_COLS + (k if side == 0 else nc - k)] for j in rows) for k in range(1, 8)]
+            d = edge_est(prof, u, EDGE['r']['col'])
+            if d is not None:
+                nx = int(round(self.maxx * (1.0 - (d if side == 0 else nc - d) / nc)))
+                info.append(('col', side, round(u, 2), round(d, 2)))
+        # along the rows (the screen's sides)
+        side, u = (0, rf) if rf <= nr - rf else (1, nr - rf)
+        if u < EDGE['near']:
+            cols = range(max(1, int(round(cf)) - 1), min(nc - 1, int(round(cf)) + 1) + 1)
+            prof = [0] + [sum(sig[(k if side == 0 else nr - k) * HM_COLS + j] for j in cols) for k in range(1, 8)]
+            d = edge_est(prof, u, EDGE['r']['row'])
+            if d is not None:
+                ny = int(round(self.maxy * (d if side == 0 else nr - d) / nr))
+                info.append(('row', side, round(u, 2), round(d, 2)))
+        if info and self.watch:
+            self.watch({'screen': self.output, 'x': x, 'y': y, 'nx': nx, 'ny': ny, 'edge': info})
+        return nx, ny
+
+    def correct(self, x, y):
+        x, y = self.edge_fix(x, y)
+        return self.fix(ABS_MT_POSITION_X, x), self.fix(ABS_MT_POSITION_Y, y)
+
+    def emit(self, events):
+        if events and self.ui is not None:
+            os.write(self.ui, b''.join(EVENT.pack(0, 0, t, c, v) for t, c, v in events))
+
     def forward(self):
+        """iptsd's events, a frame (up to SYN_REPORT) at a time, with the positions corrected"""
         data = os.read(self.fd, EVENT.size * 128)
-        out = []
         for i in range(0, len(data) - EVENT.size + 1, EVENT.size):
-            sec, usec, t, code, v = EVENT.unpack_from(data, i)
-            if t == EV_ABS and code in (ABS_X, ABS_Y, ABS_MT_POSITION_X, ABS_MT_POSITION_Y):
-                v = self.fix(code, v)
-            out.append(EVENT.pack(0, 0, t, code, v))
-        if out and self.ui is not None:
-            os.write(self.ui, b''.join(out))
+            _, _, t, code, v = EVENT.unpack_from(data, i)
+            if t == EV_SYN and code == SYN_DROPPED:
+                self.resync()
+                continue
+            if t == EV_SYN and code == SYN_REPORT:
+                self.flush()
+                continue
+            if self.fslot is None:
+                self.fslot = self.slot
+            self.frame.append((t, code, v))
+            if t != EV_ABS:
+                continue
+            if code == ABS_MT_SLOT:
+                self.slot = v
+            elif code in (ABS_X, ABS_Y):
+                self.st[code - ABS_X] = v
+            elif code in (ABS_MT_TRACKING_ID, ABS_MT_POSITION_X, ABS_MT_POSITION_Y):
+                s = self.slots.setdefault(self.slot, [-1, 0, 0])
+                s[(ABS_MT_TRACKING_ID, ABS_MT_POSITION_X, ABS_MT_POSITION_Y).index(code)] = v
+
+    def flush(self):
+        if self.heat:
+            self.heat.drain()
+        fixed = {s: self.correct(x, y) for s, (t, x, y) in self.slots.items() if t != -1}
+        out, slot, st = [], self.fslot if self.fslot is not None else self.slot, None
+        for t, code, v in self.frame:
+            if t == EV_ABS:
+                if code == ABS_MT_SLOT:
+                    slot = v
+                elif code == ABS_MT_TRACKING_ID and v == -1:
+                    self.sent.pop(slot, None)
+                elif code in (ABS_MT_POSITION_X, ABS_MT_POSITION_Y) and slot in fixed:
+                    i = 0 if code == ABS_MT_POSITION_X else 1
+                    v = fixed[slot][i]
+                    self.sent.setdefault(slot, [None, None])[i] = v
+                elif code in (ABS_X, ABS_Y):  # the single-touch copy of one contact: the pair, as the MT ones
+                    if st is None:
+                        st = self.correct(*self.st)
+                    v = st[code - ABS_X]
+            out.append((t, code, v))
+        # contacts iptsd did not move this frame, but whose estimate did (iptsd stuck at the border)
+        moved = False
+        for s, f in fixed.items():
+            if self.sent.get(s) != list(f):
+                out += [(EV_ABS, ABS_MT_SLOT, s), (EV_ABS, ABS_MT_POSITION_X, f[0]), (EV_ABS, ABS_MT_POSITION_Y, f[1])]
+                self.sent[s] = list(f)
+                moved = True
+        if moved:
+            out.append((EV_ABS, ABS_MT_SLOT, self.slot))
+        for s in [s for s, v in self.slots.items() if v[0] == -1]:
+            del self.slots[s]
+        out.append((EV_SYN, SYN_REPORT, 0))
+        self.emit(out)
+        self.frame, self.fslot = [], None
 
     def close(self):
+        if self.heat:
+            self.heat.close()
+            self.heat = None
         if self.grabbed:
             try:
                 fcntl.ioctl(self.fd, EVIOCGRAB, 0)
@@ -382,6 +620,18 @@ def main():
         for d in devs:
             d.set_maps(screens.get(d.output), r)
 
+    def watch(info):
+        line = (json.dumps(info) + '\n').encode()
+        for c, st in list(clients.items()):
+            if st.get('watch'):
+                try:
+                    c.send(line, socket.MSG_DONTWAIT)
+                except OSError:
+                    st['watch'] = False
+        if not any(st.get('watch') for st in clients.values()):
+            for d in devs:
+                d.watch = None
+
     try:
         os.unlink(SOCK)
     except FileNotFoundError:
@@ -415,7 +665,9 @@ def main():
                     pending.remove(d)
                     devs.append(d)
                     d.set_maps(screens.get(d.output), raw())
-                    log('%s now corrected (%s)' % (d.dst, 'calibrated' if d.output in screens else 'no calibration'))
+                    log('%s now corrected (%s, edges %s)' % (d.dst, 'calibrated' if d.output in screens else
+                                                              'no calibration', 'from ' + d.heat.path if d.heat else
+                                                              'as iptsd has them: no heatmap'))
                 except OSError as e:
                     log('%s: %s' % (d.node, e))
                     pending.remove(d)
@@ -428,7 +680,7 @@ def main():
         for fd in ready:
             if fd is srv:
                 c, _ = srv.accept()
-                clients[c] = {'raw': False, 'buf': b''}
+                clients[c] = {'raw': False, 'watch': False, 'buf': b''}
                 continue
             if fd in clients:
                 st = clients[fd]
@@ -473,9 +725,19 @@ def main():
                         save_conf(screens)
                         apply_maps()
                         log('calibration reset: %s' % (', '.join(sorted(screens)) or 'none left'))
+                    elif cmd == 'edge':
+                        for d in devs:
+                            d.edge = bool(req.get('on', True)) and d.heat is not None
+                        log('edge estimate %s' % ('on' if req.get('on', True) else 'off'))
+                    elif cmd == 'watch':
+                        st['watch'] = True
+                        for d in devs:
+                            d.watch = watch
                     elif cmd == 'status':
                         reply.update(screens=screens, raw=raw(),
-                                     devices=[{'node': d.node, 'name': d.dst, 'output': d.output} for d in devs])
+                                     devices=[{'node': d.node, 'name': d.dst, 'output': d.output, 'edge': d.edge,
+                                               'heatmap': d.heat.path if d.heat else None,
+                                               'report_id': d.heat.rid if d.heat else None} for d in devs])
                     else:
                         reply = {'ok': False, 'error': 'unknown command'}
                     try:

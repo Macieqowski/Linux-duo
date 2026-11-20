@@ -449,6 +449,48 @@ właściwość digitizera i iptsd (pozycja przy samym brzegu się „przykleja�
 przez to stromą mapę: odczyty 0–1,1 % rozkładają się na 0–6 % ekranu. Po zapisie Maciej ocenił „chyba działa”.
 Usługa `duo-touch-fix` jest włączona na stałe, a kalibracja zostaje w `/etc/duo/touch-calibration.json`.
 
+### Brzegi: skrajna linia czujnika jest kopią sąsiedniej (2026-11-20, wieczór)
+
+Po tej kalibracji kropki przy brzegach dalej lądowały źle: dotyk samego brzegu dawał kropkę ok. 6 % w głąb. Mapa
+zamieniała odczyt 1 % na 6 %, a odczyt ok. 1 % daje zarówno palec przy samym brzegu, jak i palec 6 % w głąb. Węzły
+brzegowe zostały więc usunięte z `/etc/duo/touch-calibration.json` (zostały 25/50/75 %; kopia z węzłami w
+`/root/touch-20261120/touch-calibration.with-edges.json` na telefonie).
+
+Nagranie surowych heatmap (hidraw tylko do odczytu, obok iptsd): przeciągnięcia ze środka do każdej krawędzi i za nią
+oraz stuknięcia przy samym brzegu, 5 mm i 1 cm od niego, na obu ekranach. Wyniki:
+- **Skrajna linia to kopia.** Skrajny wiersz i skrajna kolumna (0 i 20, 0 i 26) na każdym boku obu digitizerów to
+  dokładna kopia sąsiedniej linii albo 0, gdy sąsiednia ma mało sygnału. Prawdziwego pomiaru przy samym brzegu nie ma.
+- **Druga linia jest bramkowana.** Firmware wycina też drugą linię, dopóki sygnał na niej jest słaby, a potem skokowo
+  ją włącza (np. 7 → 72). Pozycja iptsd skacze wtedy o ok. 0,5 linii.
+- **iptsd się „przykleja”.** Dopasowanie Gaussa w iptsd (z rozmyciem i powielonym brzegiem) nie schodzi niżej niż ok.
+  0,2 linii od brzegu. Już od ok. 1,5 linii (6–7 mm) w głąb odczyt prawie stoi. Tego nie poprawi żadna mapa osi.
+- **Android liczy to inaczej.** Biblioteka Microsoftu z Androida (`libsurfacetouch.so`, przeczytana statycznie,
+  bez uruchamiania) ma `ReportInformation::StretchToBorder`. Gdy pozycja jest bliżej brzegu niż `r + a`, liczy
+  `c = 0,4247·r − 0,0316 + b`. To środek ciężkości półkola o promieniu `r`, czyli palca leżącego na samym brzegu.
+  Potem rozciąga pozycję liniowo z `[c, r + a]` na `[0, r + a]`, osobno dla każdego dotyku, z rozmiaru plamy.
+
+`duo-touch-fix` robi teraz to samo na własnych heatmapach. Czyta raporty z hidraw digitizera (0C01 → DSI-2,
+0C02 → DSI-1, mapa 21 × 27 od bajtu 26; hidraw daje każdemu czytelnikowi kopię, więc iptsd nic nie traci). Dla
+dotyku, który iptsd widzi do 4,5 linii od brzegu, liczy osobno dla każdej osi:
+1. **Profil od brzegu w głąb:** linie 1–7, bez skopiowanej skrajnej, suma 3 linii obok dotyku.
+2. **Wewnętrzne zbocze palca:** miejsce, gdzie sygnał spada do połowy szczytu. Ani kopia, ani bramkowana druga linia
+   go nie zmieniają.
+3. **Środek palca:** zbocze minus półszerokość palca w połowie sygnału (mediana z nagrania: 1,06 kolumny,
+   1,12 wiersza).
+4. **Brzeg:** palec leżący tylko na linii przy brzegu liczy się jako dotyk brzegu. Pozycje pomiędzy są rozciągnięte
+   liniowo aż do półszerokości + 0,5 linii, jak w `StretchToBorder`.
+5. **Przejście:** od 3 do 4 linii pozycja przechodzi płynnie w pozycję iptsd.
+
+Mapa z kalibracji działa dalej, już na tej pozycji. `{"cmd":"edge","on":false}` na `/run/duo-touch-fix.sock`
+wyłącza to do restartu usługi, a `{"cmd":"watch"}` pokazuje obliczenia na żywo.
+
+Sprawdzenie na nagraniu (1 linia = 4,4 mm w pionie i 4,3 mm w poziomie):
+- **Stuknięcia ok. 1 cm od dolnej krawędzi lewego ekranu** (1 cm = 2,28 linii): iptsd 2,64–2,80 linii, nowe
+  2,2–2,5.
+- **Stuknięcia ok. 5 mm od dołu prawego ekranu** (1,14 linii): iptsd 0,56–1,78 (duży rozrzut), nowe 1,28–1,48.
+- **Stuknięcia przy samym brzegu:** 0,1–0,3 linii, czyli 1–2 px.
+- **Przeciągnięcia za krawędź:** schodzą płynnie do 0, bez skoku przy włączaniu drugiej linii.
+
 ## Jasność: lewy ekran jaśniejszy
 
 Lewy ekran (DSI-1, `ae94000.dsi.0`) wyglądał na jaśniejszy od prawego (DSI-2, `ae96000.dsi.0`), najbardziej po
