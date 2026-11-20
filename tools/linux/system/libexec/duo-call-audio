@@ -13,6 +13,9 @@ Speaker and mute follow Plasma Dialer's buttons (kde-telephony-daemon's org.kde.
 speakerModeChanged / muteChanged on the session bus; callaudiod, which the dialer also asks, has no call profile for
 this card): speaker = the loudspeaker path (RX INT7) instead of the earpiece (RX INT0) and the speakerphone mic, mute =
 DEC7 at its minimum. Every call starts on the earpiece, unmuted (both buttons are reset at the end of a call).
+Plasma Dialer 6.3's call page cannot read the buttons' state back (CallPage.qml: "Cannot assign [undefined] to bool"),
+so every press sends setSpeakerMode(true) / setMute(true), never false; a true while that state is already on is
+therefore taken as the second press: this daemon sends the false to kde-telephony-daemon itself.
 Call volume: during a call the speaker sink's volume (slider, volume keys) is the call volume; it starts at the last
 call's volume (/var/lib/duo/call-volume) and the media volume comes back after the call.
 The codec must be routed to the earpiece a while before the voice start (else the downlink stays deaf until a
@@ -152,15 +155,21 @@ def level(base, pct):
     return max(0, min(124, base + round(60 * math.log10(pct / CALL_VOLUME_DEFAULT))))
 
 
+def dialer_set(method, value):
+    """setSpeakerMode / setMute of kde-telephony-daemon (it answers with speakerModeChanged / muteChanged)"""
+    as_user(['busctl', '--user', 'call', 'org.kde.telephony.DialerUtils', '/org/kde/telephony/DialerUtils/tel/mm',
+             'org.kde.telephony.DialerUtils', method, 'b', 'true' if value else 'false'])
+
+
 def dialer_reset():
     """Speaker and mute buttons off again (the next call starts on the earpiece, unmuted)."""
     for method in ('setSpeakerMode', 'setMute'):
-        as_user(['busctl', '--user', 'call', 'org.kde.telephony.DialerUtils', '/org/kde/telephony/DialerUtils/tel/mm',
-                 'org.kde.telephony.DialerUtils', method, 'b', 'false'])
+        dialer_set(method, False)
 
 
 class DialerWatch:
-    """speakerModeChanged / muteChanged of kde-telephony-daemon (session bus) as a pipe of JSON lines"""
+    """speakerModeChanged / muteChanged of kde-telephony-daemon and the setSpeakerMode / setMute calls it gets
+    (session bus) as a pipe of JSON lines"""
     def __init__(self):
         self.proc, self.buf, self.next_try = None, b'', 0.0
 
@@ -178,7 +187,10 @@ class DialerWatch:
             self.proc = None
             return False
         self.proc = subprocess.Popen(['busctl', '--user', 'monitor', '--json=short', '--match',
-                                      "type='signal',interface='org.kde.telephony.DialerUtils'"],
+                                      "type='signal',interface='org.kde.telephony.DialerUtils'", '--match',
+                                      "type='method_call',interface='org.kde.telephony.DialerUtils',member='setSpeakerMode'",
+                                      '--match',
+                                      "type='method_call',interface='org.kde.telephony.DialerUtils',member='setMute'"],
                                      user=u.pw_uid, group=u.pw_gid, env=user_env(u), stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, bufsize=0)
         self.buf = b''
@@ -200,7 +212,8 @@ class DialerWatch:
             except ValueError:
                 continue
             d = (m.get('payload') or {}).get('data') or []
-            if m.get('member') in ('speakerModeChanged', 'muteChanged') and d and isinstance(d[0], bool):
+            if m.get('member') in ('speakerModeChanged', 'muteChanged', 'setSpeakerMode', 'setMute') and d \
+                    and isinstance(d[0], bool):
                 out.append((m['member'], d[0]))
         return out
 
@@ -531,8 +544,12 @@ def main():
             for member, value in dw.read():
                 if member == 'speakerModeChanged':
                     ca.set_speaker(value)
-                else:
+                elif member == 'muteChanged':
                     ca.set_mute(value)
+                elif value and (ca.speaker if member == 'setSpeakerMode' else ca.muted):
+                    # the dialer's second press (it only ever sends true): switch it off through the daemon
+                    log('%s button pressed again: off' % ('speaker' if member == 'setSpeakerMode' else 'mute'))
+                    dialer_set(member, False)
         if mon is not None and mon.stdout in ready:
             # read the whole burst of signals of one change (raw reads: select sees no buffered lines) before acting
             while True:
