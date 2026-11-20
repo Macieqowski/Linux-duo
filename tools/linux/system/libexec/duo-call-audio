@@ -1,26 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Surface Duo in-call audio (2026-11-20, request "możesz naprawić dane komórkowe i połączenia?").
+"""Surface Duo in-call audio (2026-11-20). README: "Dźwięk rozmowy (q6voice)".
 
-The modem's call audio is mixed in the ADSP (q6voice, VoiceMMode1 front end): holding the VoiceMMode1 PCM open in
-both directions starts the voice path SLIMBUS_0_TX (microphones) -> vocproc -> modem -> vocproc -> SLIMBUS_0_RX ->
-WCD9340 EAR (earpiece). No audio data passes through this PCM, so the daemon only opens it, starts it and holds it
-while a call is up. ModemManager has no audio policy and callaudiod finds no voice profile in the UCM profile, so
-this daemon watches ModemManager's calls itself:
-
-  ringing-in / dialing  -> pre-route: add the earpiece path on the codec (the speaker path stays, for the ringtone)
-  active (ringing-out)  -> drop the speaker path, open the voice PCM at once
-  no call left          -> close the voice PCM, restore the speaker path
-
-Lessons from the test calls (docs: README "Połączenia"):
-- the codec must be switched to the earpiece a while before the voice path starts: switching it right before the
-  open ("overflow error on RX port 0") left the downlink deaf until the PCM was opened a second time;
-- the codec routes are changed only while PipeWire's sink and source are suspended;
-- the vocproc TX topology is set to NONE (0x10F70): the driver default SM_ECNS needs ACDB calibration and mutes
-  the uplink without it;
-- the WCD934x starts its SLIMbus channels only on trigger START, so the PCM is started, with the stop threshold at
-  the boundary (an empty playback stream would stop with EPIPE).
-Settings: /etc/default/duo-call-audio (shell syntax, read by the unit as environment).
+Holding the q6voice VoiceMMode1 PCM open in both directions starts the ADSP voice path (mics -> vocproc -> modem ->
+vocproc -> earpiece); no audio data passes through it. ModemManager has no audio policy, so this daemon follows its
+calls: ringing-in/dialing -> add the earpiece path on the codec (speaker kept for the ringtone); active (and
+ringing-out) -> drop the speaker path, open and start the voice PCM; no call left -> close it, restore the speaker.
+The codec must be routed to the earpiece a while before the voice start (else the downlink stays deaf until a
+re-open), routes change only with PipeWire's sink/source suspended, the TX topology is NONE (SM_ECNS needs ACDB
+calibration). Settings: /etc/default/duo-call-audio (DUO_CALL_* environment variables below).
 """
 import ctypes, os, pwd, re, select, signal, subprocess, sys, time
 
@@ -274,7 +262,7 @@ def handle(line, calls):
 
 def monitor():
     return subprocess.Popen(['gdbus', 'monitor', '--system', '--dest', 'org.freedesktop.ModemManager1'],
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
 
 
 def main():
@@ -286,23 +274,26 @@ def main():
     except FileNotFoundError:
         mon = None
         log('gdbus not found: polling ModemManager every second')
-    calls, idle_since, refresh, retry_at = {}, None, True, 0.0
+    calls, idle_since, refresh, retry_at, buf = {}, None, True, 0.0, b''
     log('watching calls (voice path at ringing-out: %s)' % OPEN_ON_RINGING_OUT)
     while not stop:
-        timeout = 1.0 if (mon is None or ca.mode != 'idle') else 30.0
+        timeout = 1.0 if mon is None else (5.0 if ca.mode != 'idle' else 30.0)
         if mon is None:
             time.sleep(timeout)
             refresh = True
         elif select.select([mon.stdout], [], [], timeout)[0]:
-            # take the whole burst of signals of one change before acting
+            # read the whole burst of signals of one change (raw reads: select sees no buffered lines) before acting
             while True:
-                line = mon.stdout.readline()
-                if not line:  # gdbus died (D-Bus restart?): start it again after a pause
+                data = os.read(mon.stdout.fileno(), 65536)
+                if not data:  # gdbus died (D-Bus restart?): start it again after a pause
                     mon.wait()
                     time.sleep(2)
-                    mon, refresh = monitor(), True
+                    mon, refresh, buf = monitor(), True, b''
                     break
-                refresh = handle(line, calls) or refresh
+                buf += data
+                *lines, buf = buf.split(b'\n')
+                for line in lines:
+                    refresh = handle(line.decode(errors='replace'), calls) or refresh
                 if not select.select([mon.stdout], [], [], 0.05)[0]:
                     break
         else:
