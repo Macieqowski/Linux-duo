@@ -223,7 +223,8 @@ nie zmienia. Obraz systemu robi to przy budowaniu (`--install`, oryginał w `/va
 bajtów. Napis „Mute” zostaje ten sam, bo dialer go nie zmienia. Pierwsza próba nie zadziałała: dialer dalej używał
 starej strony z pamięci podręcznej QML (`~/.cache/KDE/dialer/qmlcache`). Qt sprawdza ją dla plików qrc tylko po dacie
 zasobu, a poprawka tej daty nie zmienia. `--install` kasuje więc tę pamięć we wszystkich katalogach domowych. Na
-telefonie przeniesiona ręcznie 2026-11-20 o 17:52; sprawdzenie w rozmowie: w toku.
+telefonie przeniesiona ręcznie 2026-11-20 o 17:52. Sprawdzone w rozmowie tego dnia (ok. 18:10): Głośnik i Mute się
+podświetlają, ikona mikrofonu się zmienia, wyciszenie działa (Maciej: „działa super”).
 
 Wyciszenie nie działało (rozmowy testowe 2026-11-20 o 17:07 i 17:46). Zapis dotyku, okien i D-Bus z drugiej rozmowy:
 dotknięcia trafiały w przycisk Mute aktywnego okna dialera, a dialer za każdym razem wysyłał `setMute(true)`.
