@@ -35,11 +35,11 @@ def curve(lux):
 def backlights():
     return sorted(glob.glob("/sys/class/backlight/*"))
 
-# BALANCE (2026-11-08: one screen looked brighter than the other): the two AMOLED panels are not equally bright
-# at the same DCS value (this phone: the left one, DSI-1 = ae94000.dsi.0). Per-panel factor, one line per backlight in
-# /etc/duo/brightness-balance: "ae94000.dsi.0=0.86" (1.0 = as is; missing file = no balance), or a curve when the
-# panels differ more at low brightness (2026-11-20): "ae94000.dsi.0=0.86@400,0.76@160" = factor at that backlight
-# value (of 1023) of the unbalanced screen, linear in between, flat outside.
+# BALANCE, for a phone whose two panels really differ at the same DCS value. On the test phone they do not
+# (2026-11-20, side by side at 900, 400 and 150): the left one only looked brighter because KWin also dimmed the right
+# one's image (duo-kwin-outputs). Per-panel factor, one line per backlight in /etc/duo/brightness-balance:
+# "ae96000.dsi.0=0.95" (1.0 = as is; missing file = no balance), or a curve "ae96000.dsi.0=0.95@400,0.9@160" = factor
+# at that backlight value (of 1023) of the unbalanced screen, linear in between, flat outside.
 BALANCE_FILE = "/etc/duo/brightness-balance"
 def gain(b, level):
     try:

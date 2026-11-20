@@ -238,30 +238,30 @@ telefonie: w toku.
 
 ## Jasność: lewy ekran jaśniejszy
 
-Oba panele dostają tę samą wartość podświetlenia, ale lewy (DSI-1, `ae94000.dsi.0`) świeci przy niej jaśniej, a przy
-niskiej jasności różnica jest większa. `duo-autobrightness` mnoży jasność każdego ekranu przez współczynnik
-z `/etc/duo/brightness-balance`, także gdy kopiuje wartość z suwaka (albo przygaszenia PowerDevil) na drugi ekran.
-Jedna linia na ekran: stały współczynnik (`ae94000.dsi.0=0.86`) albo krzywa `współczynnik@wartość` (wartość
-podświetlenia 0–1023 ekranu bez korekty, liniowo pomiędzy punktami, poza nimi stała). Obraz systemu ustawia
-`ae94000.dsi.0=0.86@400,0.64@160` z porównania obok siebie (2026-11-20: prawy ekran stały, lewy w krokach co 10 s;
-przy 400 równe przy 86 %, przy 160 przy 64 %). Inny egzemplarz telefonu może potrzebować innych wartości (`1.0` = bez
-zmian); usługa czyta plik przy każdej zmianie jasności, więc wystarczy go poprawić i ruszyć suwakiem albo zrestartować
-usługę.
+Lewy ekran (DSI-1, `ae94000.dsi.0`) wyglądał na jaśniejszy od prawego (DSI-2, `ae96000.dsi.0`), najbardziej po
+przygaszeniu po bezczynności. Panele nie są winne. Android na Duo (biblioteka `lights.msmnile.so`) przelicza jasność
+z suwaka na nity, a dla każdego panelu ma fabryczną tabelę nity -> wartość podświetlenia (partycja `sfpd`,
+`display/FactoryOs_LUT2_0.txt` i `_1.txt`). Na testowanym egzemplarzu obie tabele różnią się najwyżej o ok. 1 % (30
+nitów: 164,1 i 163,9), a polecenia startowe obu paneli w DT Androida są takie same jak w sterowniku
+`panel-microsoft-surface-duo`.
 
-Android na Duo (biblioteka `lights.msmnile.so`) przelicza jasność z suwaka na nity, a dla każdego panelu ma fabryczną
-tabelę nity -> wartość podświetlenia (partycja `sfpd`, `display/FactoryOs_LUT2_0.txt` i `_1.txt`). Na testowanym
-egzemplarzu obie tabele różnią się najwyżej o ok. 1 % (30 nitów: 164,1 i 163,9), a polecenia startowe obu paneli w DT
-Androida są takie same jak w sterowniku `panel-microsoft-surface-duo`. Fabrycznie panele świecą więc przy tej samej
-wartości tak samo.
-
-Przyczyna jest w KWin 6.3: jasność ekranu (suwak razy przygaszenie po bezczynności) ustawia on przez urządzenie
+Przyczyna była w KWin 6.3. Jasność ekranu (suwak razy przygaszenie po bezczynności) KWin ustawia przez urządzenie
 jasności przypisane do ekranu, a gdy ekran go nie ma i w `~/.config/kwinoutputconfig.json` jest
 `allowSdrSoftwareBrightness: true`, przyciemnia sam obraz. PowerDevil daje KWin tylko jedno podświetlenie i KWin
-przypisuje je pierwszemu wewnętrznemu ekranowi (DSI-1, lewy). Prawy ekran (DSI-2) był więc przyciemniany dwa razy: w
-obrazie i podświetleniem, które `duo-autobrightness` kopiuje z lewego. Najbardziej widać to po przygaszeniu (suwak 52
-% razy przygaszenie 30 %: obraz prawego ekranu przy ok. 1/5 jasności). `duo-kwin-outputs` (usługa `duo-kwin-outputs`
-przed menedżerem logowania, bo KWin czyta ten plik tylko przy starcie) wyłącza `allowSdrSoftwareBrightness` na obu
-ekranach DSI. Czy po tej poprawce krzywa z `/etc/duo/brightness-balance` jest jeszcze potrzebna: test w toku.
+przypisuje je pierwszemu wewnętrznemu ekranowi (DSI-1, lewy). Prawy ekran był więc przyciemniany dwa razy: w obrazie
+i podświetleniem, które `duo-autobrightness` kopiuje z lewego. Najbardziej było to widać po przygaszeniu: przy suwaku
+na 52 % i przygaszeniu do 30 % obraz prawego ekranu miał ok. 1/5 jasności. `duo-kwin-outputs` wyłącza
+`allowSdrSoftwareBrightness` na obu ekranach DSI. Uruchamia go usługa `duo-kwin-outputs` przed menedżerem logowania,
+bo KWin czyta ten plik tylko przy starcie (nie zatrzymuj KWin ani SDDM w działającym systemie: wyłączenie paneli
+zawiesza wyświetlanie do restartu). Test po poprawce (2026-11-20: lewy ekran stały, prawy w 7 krokach od 112 do 76 %
+przy wartościach 900, 400 i 150): przy każdej jasności oba ekrany wyglądały tak samo przy tej samej wartości.
+
+Gdyby inny egzemplarz miał naprawdę różne panele, `duo-autobrightness` może mnożyć jasność ekranu przez współczynnik
+z `/etc/duo/brightness-balance`, także gdy kopiuje wartość suwaka albo przygaszenia na drugi ekran. Jedna linia na
+ekran: stały współczynnik (`ae96000.dsi.0=0.95`) albo krzywa `współczynnik@wartość` (wartość podświetlenia 0–1023
+ekranu bez korekty, liniowo pomiędzy punktami, poza nimi stała). Usługa czyta plik przy każdej zmianie jasności.
+Obraz systemu tego pliku nie tworzy. Wcześniejsza krzywa `0.86@400,0.64@160` była zmierzona, gdy KWin jeszcze
+przyciemniał prawy ekran, i jest nieaktualna.
 
 ## Wibracje: reset telefonu przy „sile wibracji”
 
