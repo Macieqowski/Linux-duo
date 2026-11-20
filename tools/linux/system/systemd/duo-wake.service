@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Surface Duo: wake the screens at desktop notifications (duo-wake; off: touch /etc/duo/wake-notify-off). Calls wake
-# through duo-call-audio, the hinge through duo-posture.
+# Surface Duo screen wake (duo-wake): keeps the uinput wake keyboard (a new one takes KWin ~1 s) for the requests of
+# duo-call-audio (calls) and duo-posture (opening) on /run/duo-wake.sock, and wakes at desktop notifications
+# (off: touch /etc/duo/wake-notify-off).
 [Unit]
-Description=Surface Duo screen wake at notifications
+Description=Surface Duo screen wake (calls, notifications, opening)
 After=display-manager.service
 
 [Service]

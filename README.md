@@ -22,7 +22,7 @@ Stan z linuxduobench (jądro 6.19, jeden telefon), który ta wersja ma powtórzy
 | GPU (Adreno 640) | działa | Mesa freedreno/turnip z backports |
 | Wi-Fi, Bluetooth | działa | ath10k / hci_qca |
 | Dane komórkowe (LTE) | działa | modem + IPA v4.1 + ModemManager |
-| **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`, [dzwonek z wibracją i budzeniem ekranu](#dzwonek-wibracja-i-budzenie-ekranu) (test w toku). Bez głośnomówiącego |
+| **Połączenia, SMS** | **działa (2G)** | SMS i połączenia przez 2G z [obejściem modemu](#modem-obejście-awarii-quick-offline); [dźwięk rozmowy](#dźwięk-rozmowy-q6voice) w obie strony (słuchawka + mikrofon), przychodzące i wychodzące, z usługą `duo-call-audio`, [dzwonek z wibracją i budzeniem ekranu](#dzwonek-wibracja-i-budzenie-ekranu). Bez głośnomówiącego |
 | Głośnik, mikrofony | działa | WCD9340 + WSA8815, strojenie z ACDB telefonu. Na 7.3.5 głośnik milczał: [naprawione trasą w DT](#głośnik-cisza-na-735) |
 | Słuchawka do rozmów | działa | wyjście EAR kodeka (`0076`–`0079`); w rozmowie gra przez DSP ([dźwięk rozmowy](#dźwięk-rozmowy-q6voice)), [ciszej niż głośnik](#słuchawka-do-rozmów-wyjście-ear) |
 | Czujniki, zawias, obrót | działa | SLPI + hexagonrpcd + libssc (budowane w obrazie) |
@@ -223,9 +223,12 @@ grał podwójnie. Ustawienia w `/etc/default/duo-call-audio`: `DUO_CALL_RINGTONE
 `DUO_CALL_VIBRATE=0` (bez wibracji), `DUO_CALL_WAKE=0` (bez budzenia).
 
 Budzenie: KWin włącza wyłączone ekrany (DPMS, po bezczynności albo przyciskiem zasilania) przy naciśnięciu dowolnego
-klawisza, a `org.freedesktop.ScreenSaver.SimulateUserActivity` ich nie włącza (sprawdzone). `duo-wake` tworzy więc na
-chwilę klawiaturę uinput z jednym klawiszem `KEY_WAKEUP` i naciska go raz (KWin nie traktuje jej jak sprzętowej
-klawiatury). Ekrany budzą się:
+klawisza, a `org.freedesktop.ScreenSaver.SimulateUserActivity` ich nie włącza (sprawdzone). `duo-wake` naciska więc
+raz klawisz `KEY_WAKEUP` na klawiaturze uinput, która ma tylko ten klawisz (KWin nie traktuje jej jak sprzętowej
+klawiatury). Nowe urządzenie uinput KWin widzi dopiero po ok. 1 s, co opóźniało zapalanie ekranów przy otwieraniu
+telefonu, dlatego usługa `duo-wake` trzyma tę klawiaturę cały czas, a `duo-call-audio` i `duo-posture` proszą ją o
+budzenie przez `/run/duo-wake.sock` (bez usługi `duo-wake` tworzy klawiaturę na chwilę, jak wcześniej). Ekrany budzą
+się:
 
 - przy połączeniu przychodzącym (`duo-call-audio`);
 - przy powiadomieniu o zwykłej albo krytycznej pilności: usługa `duo-wake` śledzi
@@ -233,8 +236,9 @@ klawiatury). Ekrany budzą się:
   wyłączenie: `touch /etc/duo/wake-notify-off`;
 - przy otwarciu telefonu albo zmianie ułożenia (`duo-posture`, tryb jednego lub dwóch ekranów).
 
-Gdy telefon jest zamknięty (`/run/duo-posture.state`), połączenia i powiadomienia nie budzą ekranów. Test na
-telefonie: w toku.
+Gdy telefon jest zamknięty (`/run/duo-posture.state`), połączenia i powiadomienia nie budzą ekranów. Sprawdzone na
+telefonie 2026-11-20: połączenie przychodzące przy wygaszonym ekranie (dzwonek, wibracja, ekran się włącza),
+powiadomienie (ekrany włączone po ok. 1 s) i otwarcie zablokowanego telefonu.
 
 ## Jasność: lewy ekran jaśniejszy
 
